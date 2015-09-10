@@ -255,13 +255,10 @@ int isLessOrEqual(int x, int y) {
  */
 int logicalNeg(int x) {
   // x is considered true for non-zero values
-  // We can fold x by half till the last digit by Or-ing upper half and lower half digits
-  int y = x | (x >> 16);
-  y = y | (y >> 8);
-  y = y | (y >> 4);
-  y = y | (y >> 2);
-  y = y | (y >> 1);
-  return (y & 0x01) ^ 0x01;
+  // If x is zero, the sign bit of x - 1 is different from that of x
+  // Tmin needs to be ruled out because 100...000 has the same property
+  int Tmin = 1 << 31;
+  return (((x ^ (x - 1)) & (x ^ Tmin)) >> 31) & 0x01;
 }
 /* howManyBits - return the minimum number of bits required to represent x in
  *             two's complement
