@@ -1,7 +1,7 @@
 /* 
  * CS:APP Data Lab 
  * 
- * <Please put your name and userid here>
+ * Jieyu Lu  ID: jieyul1
  * 
  * bits.c - Source file with your solutions to the Lab.
  *          This is the file you will hand in to your instructor.
@@ -140,7 +140,8 @@ NOTES:
  *   Rating: 1
  */
 int bitXor(int x, int y) {
-  return 2;
+       // x ^ y = not(not x and not y) and not(x and y)
+       return (~(~x & ~y)) & (~(x & y));
 }
 /* 
  * tmin - return minimum two's complement integer 
@@ -149,7 +150,8 @@ int bitXor(int x, int y) {
  *   Rating: 1
  */
 int tmin(void) {
-  return 2;
+  // The minimun 2's complement integer is 100...00, which is exactly 0x01 shifts left by 31 bits
+  return 1 << 31;
 }
 //2
 /*
@@ -160,7 +162,10 @@ int tmin(void) {
  *   Rating: 2
  */
 int isTmax(int x) {
-  return 2;
+  // Tmax has the form 011...111, therefore 2 * Tmax + 2 = 0
+  // However -1 (111...111) has the same property, therefore we need to rule that out first
+  int isNotNegOne = !!(x + 1);// if this is zero, we know that x is -1
+  return isNotNegOne & (!(x + x + 2));
 }
 /* 
  * allOddBits - return 1 if all odd-numbered bits in word set to 1
@@ -170,7 +175,13 @@ int isTmax(int x) {
  *   Rating: 2
  */
 int allOddBits(int x) {
-  return 2;
+  // Fold the number twice by first and-ing the first and last 16 bits, and then and-ing the first and last 8 bits of the resulting number
+  int y = x & (x >> 16);
+  y = y & (y >> 8);
+  // Then and-ing the folded number with 0xAA, check if the resulting number is still 0xAA by adding 0x56 to it
+  // Adding 0x56 to 0xAA gives 0x100, therefore shifting right by 8 digits yields 0x01
+  // If the resulting number is not 0xAA, in this case smaller than 0xAA, the result will be 0
+  return ((y & 0xAA) + 0x56) >> 8;
 }
 /* 
  * negate - return -x 
@@ -180,7 +191,8 @@ int allOddBits(int x) {
  *   Rating: 2
  */
 int negate(int x) {
-  return 2;
+  // -x = ~x + 1
+  return ~x + 1;
 }
 //3
 /* 
@@ -193,7 +205,11 @@ int negate(int x) {
  *   Rating: 3
  */
 int isAsciiDigit(int x) {
-  return 2;
+  // Check if the second hex digit is 3
+  int isThree = !((x >> 4) + (~0x03) + 1);
+  // Check if the first hex digit is between 0 and 9 by adding 0x07 and then shift right 4 bits.
+  int isZeroToNine = !(((x & 0x0f) + 0x06) >> 4);
+  return isThree & isZeroToNine;
 }
 /* 
  * conditional - same as x ? y : z 
@@ -203,7 +219,10 @@ int isAsciiDigit(int x) {
  *   Rating: 3
  */
 int conditional(int x, int y, int z) {
-  return 2;
+  // Use a mask so that when x is true, mask = 0xff..ff and when x is false, mask = 0x00..00
+  int mask = !x + ~1 + 1;
+  // The return value is dependent on mask
+  return (mask & y) | (~mask & z);
 }
 /* 
  * isLessOrEqual - if x <= y  then return 1, else return 0 
@@ -213,7 +232,17 @@ int conditional(int x, int y, int z) {
  *   Rating: 3
  */
 int isLessOrEqual(int x, int y) {
-  return 2;
+  // x ^ y tells if x and y are equal, and its sign bit tells if x and y have the same sign
+  int xXorY = x ^ y;
+  // Then calculate if x is negative and y is non-negative. If that's the case, the sign bit of (~y) & x is 1
+  int isXNegYNonNeg = (~y) & x;
+  // Then calculate the difference of x and y
+  int diff = y + ~x + 1;
+  // x is less than or equal to y when:
+  // 1. x and y are equal
+  // 2. x is negative and y is non-negative
+  // 3. x and y have the same sign, and x - y > 0
+  return (!xXorY) | (((isXNegYNonNeg | ~(xXorY | diff)) >> 31)  & 0x01) ;
 }
 //4
 /* 
