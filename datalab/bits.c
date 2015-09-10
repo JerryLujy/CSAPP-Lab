@@ -255,10 +255,8 @@ int isLessOrEqual(int x, int y) {
  */
 int logicalNeg(int x) {
   // x is considered true for non-zero values
-  // If x is zero, the sign bit of x - 1 is different from that of x
-  // Tmin needs to be ruled out because 100...000 has the same property
-  int Tmin = 1 << 31;
-  return (((x ^ (x - 1)) & (x ^ Tmin)) >> 31) & 0x01;
+  // If x is zero, the sign bit of x - 1 is the same as that of x
+  return ((~x & (x - 1)) >> 31) & 0x01;
 }
 /* howManyBits - return the minimum number of bits required to represent x in
  *             two's complement
@@ -273,6 +271,7 @@ int logicalNeg(int x) {
  *  Rating: 4
  */
 int howManyBits(int x) {
+  
   return 0;
 }
 //float
