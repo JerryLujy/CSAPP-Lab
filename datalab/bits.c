@@ -220,7 +220,7 @@ int isAsciiDigit(int x) {
  */
 int conditional(int x, int y, int z) {
   // Use a mask so that when x is true, mask = 0xff..ff and when x is false, mask = 0x00..00
-  int mask = !x + ~1 + 1;
+  int mask = !x + ~0;
   // The return value is dependent on mask
   return (mask & y) | (~mask & z);
 }
@@ -256,7 +256,7 @@ int isLessOrEqual(int x, int y) {
 int logicalNeg(int x) {
   // x is considered true for non-zero values
   // If x is zero, the sign bit of x - 1 is the same as that of x
-  return ((~x & (x - 1)) >> 31) & 0x01;
+  return ((~x & (x + ~0)) >> 31) & 0x01;
 }
 /* howManyBits - return the minimum number of bits required to represent x in
  *             two's complement
@@ -271,8 +271,26 @@ int logicalNeg(int x) {
  *  Rating: 4
  */
 int howManyBits(int x) {
-  
-  return 0;
+  // For positive number, bits required = 1 + position of the first digit 1 (from left to right)
+  // For negative number, bits required = 1 + position of the first digit 0 (from left to right)
+  // If we take ~ of a negative number, we can find the bits required the same way as positive number
+  int y = x ^ (x >> 31);// y is x if x>0, y is ~x if x<0
+  // Check if the first bit 1 is in left 16 bits or right 16 bits
+  int inLeft = !!(y >> 16);
+  int position = inLeft << 4;// If in left, position is at least 16
+  // Continue to check first bit is in left 8 bits or right 8 bits among the target 16 bits
+  inLeft = !!(y >> (8 + position));
+  position = position + (inLeft << 3);// If in left, position is at least 8 + previous position
+  // Continue in that manner until the bit has been secured
+  inLeft = !!(y >> (4 + position));
+  position = position + (inLeft << 2);
+  inLeft = !!(y >> (2 + position));
+  position = position + (inLeft << 1);
+  inLeft = !!(y >> (1 + position));
+  position = position + inLeft;
+  // The actual position of the first 1 is (position+1). Therefore we need position+2 bits
+  // However if x is 0x00 we need to minus one from the result, i.e. result = 1;
+  return position + 2 - !y;
 }
 //float
 /* 
