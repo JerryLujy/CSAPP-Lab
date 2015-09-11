@@ -290,7 +290,7 @@ int howManyBits(int x) {
   position = position + inLeft;
   // The actual position of the first 1 is (position+1). Therefore we need position+2 bits
   // However if x is 0x00 we need to minus one from the result, i.e. result = 1;
-  return position + 2 - !y;
+  return position + 2 + ~!y + 1;
 }
 //float
 /* 
