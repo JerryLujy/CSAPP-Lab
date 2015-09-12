@@ -305,7 +305,21 @@ int howManyBits(int x) {
  *   Rating: 4
  */
 unsigned float_twice(unsigned uf) {
-  return 2;
+  unsigned exp  = uf & 0x7f800000;
+  unsigned frac = uf & 0x007fffff;
+  unsigned rtv = 0;// Stores the value to be returned
+  // Check if uf is NaN or inf
+  if (exp == 0x7f800000)
+    return uf;
+  // If exponent is 0, uf is denormalized value, shift everything left
+  if (!exp)
+    return (uf & 0x80000000) | (frac << 1);
+  // Add one to the exponent field to make the float twice
+  rtv = uf + 0x00800000;
+  // check exponent, if exponent is all 1, return inf
+  if ((rtv & 0x7f800000) == 0x7f800000)
+    return rtv & 0xff800000;
+  return rtv;
 }
 /* 
  * float_i2f - Return bit-level equivalent of expression (float) x
