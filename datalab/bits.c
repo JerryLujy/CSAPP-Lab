@@ -381,5 +381,20 @@ unsigned float_i2f(int x) {
  *   Rating: 4
  */
 int float_f2i(unsigned uf) {
-  return 2;
+  int S = uf & 0x80000000;
+  int E = ((uf & 0x7f800000) >> 23) - 127;// E = exp - bias
+  int M = (uf & 0x007fffff) | 0x00800000;
+  int rtv;
+  int shift = E - 23;// The final value is the mantissa shifted by some value
+  if (E < 0)
+    return 0;
+  if (E >= 31)
+    return 0x80000000;
+  if (shift >= 0)
+    rtv = M << shift;
+  else 
+    rtv = M >> (-shift);
+  if (S)
+    rtv = -rtv;
+  return rtv;
 }
