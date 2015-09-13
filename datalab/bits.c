@@ -331,7 +331,42 @@ unsigned float_twice(unsigned uf) {
  *   Rating: 4
  */
 unsigned float_i2f(int x) {
-  return 2;
+  unsigned sign = x & 0x80000000;// The sign of the integer
+  unsigned abs_x = x;// Absolute value of x
+  unsigned exp  = 0;
+  unsigned frac = 0;
+  unsigned rtv  = 0;
+  // Handle Tmin case specially
+  if (x == 0x80000000) return 0xCF000000;
+  // Negate x if x is negative
+  if (sign) abs_x = -x;
+  // Find exp by shifting right
+  while (abs_x >> (exp + 1)) exp += 1;
+  // If exp is larger than 23, rounding needs to be carried out
+  if (exp > 23) {
+    int exceed = exp - 23;
+    int guardBitPosMask = 1 << exceed;
+    int roundBitPosMask = guardBitPosMask >> 1;
+    int guard  = abs_x & guardBitPosMask;
+    int round  = abs_x & roundBitPosMask;
+    int sticky = abs_x & (roundBitPosMask - 1);
+    frac = abs_x;
+    // Check when frac needs to be rounded
+    if (round && (sticky || (guard && !sticky))) {
+      frac += guardBitPosMask;
+      // If there is carry, increment expo
+      if (frac & (guardBitPosMask << 24)) {
+	frac = 0;
+	exp++;
+      }
+    }
+    frac >>= exceed;
+  }
+  else 
+    frac = abs_x << (23-exp);
+  exp += 0x7F;// Add bias (127 in single precision)
+  if (x) rtv = sign | (exp << 23) | (frac & 0x007fffff);
+  return rtv;
 }
 /* 
  * float_f2i - Return bit-level equivalent of expression (int) f
