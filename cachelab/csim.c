@@ -6,13 +6,12 @@
 
 typedef struct line_st {
   int valid;
+  int timeStamp;
   unsigned long tag;
 } Line;
 
-typedef struct set_st {
-  Line * line;
-  int lruInd;
-} Set;
+typedef Line * Set;
+typedef Set * Cache;
 
 void printUsage(char * arg) {
   printf("\nUsage: %s [-hv] -s <s> -E <E> -b <b> -t <tracefile>\n\n", arg);
@@ -57,13 +56,13 @@ int main(int argc, char * * argv) {
   }
   int S = (1 << s);
   // Initiates the data structure for the cache
-  Set * set = malloc(S * sizeof(Set));
+  Line * * cache = malloc(S * sizeof(Line *));
   for (int i = 0; i < S; i++) {
-    set[i].line = malloc(E * sizeof(Line));
+    cache[i] = malloc(E * sizeof(Line));
     for (int j = 0; j < E; j++) {
-      set[i].line[j].valid = 0;
+      cache[i][j].valid = 0;
+      cache[i][j].timeStamp = 0;
     }
-    set[i].lruInd = 0;
   }
 
   // Open the trace file
@@ -76,31 +75,72 @@ int main(int argc, char * * argv) {
   char op;// Type of operation on memory in the trace file
   unsigned long addr;// 64-bit hexadecimal memory address
   unsigned size;// Number of bytes accessed by the operation
-  unsigned long tag;// Tag bits
-  unsigned setInd;// Index of set where the block belongs to
 
   // The result values to be returned
   int timeHit = 0, timeMiss = 0, timeEvict = 0;
   
   while (fscanf(fptr, " %c %lx,%d\n", &op, &addr, &size) != EOF) {
-    tag = addr >> (s + b);
-    setInd = (addr >> b) & ((1 << s) - 1);
+    unsigned long tag = addr >> (s + b);
+    unsigned setInd = (addr >> b) & ((1 << s) - 1);
 
-    if (op == 'I') continue;
+    Set set = cache[setInd];
+    int hit = 0;// Indicator if we have encountered a hit
+
     if (verbose) printf("%c %lx,%d ", op, addr, size);
-    printf("\t\ttag=%lx\tset=%d\n", tag, setInd);
+    printf("(tag=%lx, set=%d)", tag, setInd);
 
+    if (op == 'L' || op == 'S') {
+      // Search through all lines in the set to see if we have a hit
+      for (int i = 0; i < E; i++) {
+	if (set[i].valid && set[i].tag == tag) {
+	  hit = 1;
+	  // Refresh the time stamp now to indicate that we have recently used this line
+	  set[i].timeStamp = 0;
+	  break;
+	}
+      }
+      // If we have a hit, great, update the hit counter and continue the while loop
+      if (hit) {
+	if (verbose) printf("hit ");
+	timeHit++;
+      }
+      // If we don't have a hit
+      else {
+	if (verbose) printf("miss ");
+	timeMiss++;
+	// Find if there exists a line in the set with valid bit not set.
+	int spareLine = -1;
+	for (int i = 0; i < E; i++) {
+	  if (!set[i].valid) {
+	    spareLine = i;
+	    break;
+	  }
+	}
+	// If there is, update that line
+	if (spareLine != -1) {
+	  set[spareLine].valid = 1;
+	  set[spareLine].tag = tag;
+	  set[spareLine].timeStamp = 0;
+	}
+	// If all lines are occupied, we need to evict a least recently used line
+	else {
+	  
+	}
+      }
+    }
     
-  }
+    if (op == 'M') {
 
-  if (verbose) printf("\n");
+    }
+    if (verbose) printf("\n");
+  }
   printSummary(timeHit, timeMiss, timeEvict);
 
   // Frees the data structure and close file before exiting
   fclose(fptr);
   for (int i = 0; i < S; i++) {
-    free(set[i].line);
+    free(cache[i]);
   }
-  free(set);
+  free(cache);
   return(EXIT_SUCCESS);
 }
