@@ -13,6 +13,15 @@ typedef struct line_st {
 typedef Line * Set;
 typedef Set * Cache;
 
+int findLRU(Set s, int E) {
+  int ind = 0;
+  int maxStamp = 0;
+  for (int i = 0; i < E; i++) {
+    if (s[i].timeStamp > maxStamp) ind = i;
+  }
+  return ind;
+}
+
 void printUsage(char * arg) {
   printf("\nUsage: %s [-hv] -s <s> -E <E> -b <b> -t <tracefile>\n\n", arg);
 }
@@ -56,7 +65,7 @@ int main(int argc, char * * argv) {
   }
   int S = (1 << s);
   // Initiates the data structure for the cache
-  Line * * cache = malloc(S * sizeof(Line *));
+  Cache cache = malloc(S * sizeof(Line *));
   for (int i = 0; i < S; i++) {
     cache[i] = malloc(E * sizeof(Line));
     for (int j = 0; j < E; j++) {
@@ -89,23 +98,28 @@ int main(int argc, char * * argv) {
     if (verbose) printf("%c %lx,%d ", op, addr, size);
     printf("(tag=%lx, set=%d)", tag, setInd);
 
+    // Update the time stamp for each of the lines in the cache
+    for (int i = 0; i < S; i++) {
+      for (int j = 0; j < E; j++) {
+	(cache[i][j].timeStamp)++;
+      }
+    }
+    // For "Load" and "Store" operation, the effect on the cache is the same
     if (op == 'L' || op == 'S') {
       // Search through all lines in the set to see if we have a hit
+      // If we have a hit, great, update the hit counter and continue the while loop
       for (int i = 0; i < E; i++) {
 	if (set[i].valid && set[i].tag == tag) {
 	  hit = 1;
 	  // Refresh the time stamp now to indicate that we have recently used this line
 	  set[i].timeStamp = 0;
+	  if (verbose) printf("hit ");
+	  timeHit++;
 	  break;
 	}
       }
-      // If we have a hit, great, update the hit counter and continue the while loop
-      if (hit) {
-	if (verbose) printf("hit ");
-	timeHit++;
-      }
       // If we don't have a hit
-      else {
+      if (!hit) {
 	if (verbose) printf("miss ");
 	timeMiss++;
 	// Find if there exists a line in the set with valid bit not set.
@@ -124,7 +138,11 @@ int main(int argc, char * * argv) {
 	}
 	// If all lines are occupied, we need to evict a least recently used line
 	else {
-	  
+	  int lru = findLRU(set, E);
+	  set[lru].tag = tag;
+	  set[lru].timeStamp = 0;
+	  if (verbose) printf("eviction ");
+	  timeEvict++;
 	}
       }
     }
