@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <getopt.h>
+#include "cachelab.h"
 
 typedef struct line_st {
   int valid;
@@ -18,9 +19,9 @@ void printUsage(char * arg) {
 }
 
 int main(int argc, char * * argv) {
-  int s = 0;
-  int E = 0;
-  int b = 0;
+  int s = 0;// Number of set index bits
+  int E = 0;// Number of lines per set
+  int b = 0;// Number of block bits
   int verbose = 0;
   char * fileStr = NULL;
   char ch;
@@ -66,8 +67,23 @@ int main(int argc, char * * argv) {
   }
 
   if (verbose);
-  
-  // Frees the data structure before exiting
+  // Open the trace file
+  FILE * fptr = fopen(fileStr, "r");
+  if (fptr == NULL) {
+    printf("Unable to open file \"%s\"\n", fileStr);
+    return(EXIT_FAILURE);
+  }
+
+  char op;// Type of operation on memory in the trace file
+  unsigned addr;// 64-bit hexadecimal memory address
+  int size;// Numbe of bytes accessed by the operation
+
+  while (fscanf(fptr, " %c %x,%d\n", &op, &addr, &size) != EOF) {
+    printf("OP: %c\tADDR:%x(%d)\tSIZE:%d\n", op, addr, addr, size);
+  }
+
+  // Frees the data structure and close file before exiting
+  fclose(fptr);
   for (int i = 0; i < S; i++) {
     free(set[i].line);
   }
