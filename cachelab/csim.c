@@ -6,7 +6,7 @@
 
 typedef struct line_st {
   int valid;
-  unsigned tag;
+  unsigned long tag;
 } Line;
 
 typedef struct set_st {
@@ -66,7 +66,6 @@ int main(int argc, char * * argv) {
     set[i].lruInd = 0;
   }
 
-  if (verbose);
   // Open the trace file
   FILE * fptr = fopen(fileStr, "r");
   if (fptr == NULL) {
@@ -75,12 +74,27 @@ int main(int argc, char * * argv) {
   }
 
   char op;// Type of operation on memory in the trace file
-  unsigned addr;// 64-bit hexadecimal memory address
-  int size;// Numbe of bytes accessed by the operation
+  unsigned long addr;// 64-bit hexadecimal memory address
+  unsigned size;// Number of bytes accessed by the operation
+  unsigned long tag;// Tag bits
+  unsigned setInd;// Index of set where the block belongs to
 
-  while (fscanf(fptr, " %c %x,%d\n", &op, &addr, &size) != EOF) {
-    printf("OP: %c\tADDR:%x(%d)\tSIZE:%d\n", op, addr, addr, size);
+  // The result values to be returned
+  int timeHit = 0, timeMiss = 0, timeEvict = 0;
+  
+  while (fscanf(fptr, " %c %lx,%d\n", &op, &addr, &size) != EOF) {
+    tag = addr >> (s + b);
+    setInd = (addr >> b) & ((1 << s) - 1);
+
+    if (op == 'I') continue;
+    if (verbose) printf("%c %lx,%d ", op, addr, size);
+    printf("\t\ttag=%lx\tset=%d\n", tag, setInd);
+
+    
   }
+
+  if (verbose) printf("\n");
+  printSummary(timeHit, timeMiss, timeEvict);
 
   // Frees the data structure and close file before exiting
   fclose(fptr);
