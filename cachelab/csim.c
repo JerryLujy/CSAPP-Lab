@@ -1,27 +1,38 @@
+/*
+ * 15213 cache lab Part A -- Cache Simulator
+ * 
+ * Author: Jieyu Lu
+ * Andrew ID: jieyul1
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <getopt.h>
 #include "cachelab.h"
 
+// Structor that simulates the behavior of a cache line
 typedef struct line_st {
   int valid;
   int timeStamp;
   unsigned long tag;
 } Line;
-
 typedef Line * Set;
 typedef Set * Cache;
 
+// Find the least recently used line in a set according to the time stamp associated with each line
 int findLRU(Set s, int E) {
   int ind = 0;
   int maxStamp = 0;
   for (int i = 0; i < E; i++) {
-    if (s[i].timeStamp > maxStamp) ind = i;
+    if (s[i].timeStamp > maxStamp) {
+      ind = i;
+      maxStamp = s[i].timeStamp;
+    }
   }
   return ind;
 }
 
+// Helper function that prints out the usage of the program
 void printUsage(char * arg) {
   printf("\nUsage: %s [-hv] -s <s> -E <E> -b <b> -t <tracefile>\n\n", arg);
 }
@@ -65,7 +76,7 @@ int main(int argc, char * * argv) {
   }
   int S = (1 << s);
   // Initiates the data structure for the cache
-  Cache cache = malloc(S * sizeof(Line *));
+  Cache cache = malloc(S * sizeof(Set));
   for (int i = 0; i < S; i++) {
     cache[i] = malloc(E * sizeof(Line));
     for (int j = 0; j < E; j++) {
@@ -89,14 +100,16 @@ int main(int argc, char * * argv) {
   int timeHit = 0, timeMiss = 0, timeEvict = 0;
   
   while (fscanf(fptr, " %c %lx,%d\n", &op, &addr, &size) != EOF) {
+    // If the operation is "I", ignore it
+    if (op == 'I') continue;
+    
     unsigned long tag = addr >> (s + b);
     unsigned setInd = (addr >> b) & ((1 << s) - 1);
 
-    Set set = cache[setInd];
+    Set set = cache[setInd];// Reference to the set we are dealing with
     int hit = 0;// Indicator if we have encountered a hit
 
     if (verbose) printf("%c %lx,%d ", op, addr, size);
-    printf("(tag=%lx, set=%d)", tag, setInd);
 
     // Update the time stamp for each of the lines in the cache
     for (int i = 0; i < S; i++) {
@@ -104,51 +117,50 @@ int main(int argc, char * * argv) {
 	(cache[i][j].timeStamp)++;
       }
     }
-    // For "Load" and "Store" operation, the effect on the cache is the same
-    if (op == 'L' || op == 'S') {
-      // Search through all lines in the set to see if we have a hit
-      // If we have a hit, great, update the hit counter and continue the while loop
+    // For 'M', 'L' and 'S' operations
+    // Search through all lines in the set to see if we have a hit
+    // If we have a hit, great, update the hit counter and reset the time stamp
+    for (int i = 0; i < E; i++) {
+      if (set[i].valid && set[i].tag == tag) {
+	hit = 1;
+	// Refresh the time stamp now to indicate that we have recently used this line
+	set[i].timeStamp = 0;
+	if (verbose) printf("hit ");
+	timeHit++;
+	break;
+      }
+    }
+    // If we don't have a hit
+    if (!hit) {
+      if (verbose) printf("miss ");
+      timeMiss++;
+      // Find if there exists a line in the set with valid bit not set.
+      int spareLine = -1;
       for (int i = 0; i < E; i++) {
-	if (set[i].valid && set[i].tag == tag) {
-	  hit = 1;
-	  // Refresh the time stamp now to indicate that we have recently used this line
-	  set[i].timeStamp = 0;
-	  if (verbose) printf("hit ");
-	  timeHit++;
+	if (!set[i].valid) {
+	  spareLine = i;
 	  break;
 	}
       }
-      // If we don't have a hit
-      if (!hit) {
-	if (verbose) printf("miss ");
-	timeMiss++;
-	// Find if there exists a line in the set with valid bit not set.
-	int spareLine = -1;
-	for (int i = 0; i < E; i++) {
-	  if (!set[i].valid) {
-	    spareLine = i;
-	    break;
-	  }
-	}
-	// If there is, update that line
-	if (spareLine != -1) {
-	  set[spareLine].valid = 1;
-	  set[spareLine].tag = tag;
-	  set[spareLine].timeStamp = 0;
-	}
-	// If all lines are occupied, we need to evict a least recently used line
-	else {
-	  int lru = findLRU(set, E);
-	  set[lru].tag = tag;
-	  set[lru].timeStamp = 0;
-	  if (verbose) printf("eviction ");
-	  timeEvict++;
-	}
+      // If there is, update that line
+      if (spareLine != -1) {
+	set[spareLine].valid = 1;
+	set[spareLine].tag = tag;
+	set[spareLine].timeStamp = 0;
+      }
+      // If all lines are occupied, we need to evict a least recently used line
+      else {
+	int lru = findLRU(set, E);
+	set[lru].tag = tag;
+	set[lru].timeStamp = 0;
+	if (verbose) printf("eviction ");
+	timeEvict++;
       }
     }
-    
+    // For operation 'M', there must be a hit after the first store operation
     if (op == 'M') {
-
+      if (verbose) printf("hit ");
+      timeHit++;
     }
     if (verbose) printf("\n");
   }
