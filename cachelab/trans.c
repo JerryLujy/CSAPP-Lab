@@ -1,4 +1,7 @@
 /* 
+ * Jieyu Lu
+ * Andrew ID: jieyul1
+ *
  * trans.c - Matrix transpose B = A^T
  *
  * Each transpose function must have a prototype of the form:
@@ -24,10 +27,43 @@ int is_transpose(int M, int N, int A[N][M], int B[M][N]);
 char transpose_submit_desc[] = "Transpose submission";
 void transpose_submit(int M, int N, int A[N][M], int B[M][N])
 {
-    REQUIRES(M > 0);
-    REQUIRES(N > 0);
+  REQUIRES(M > 0);
+  REQUIRES(N > 0);
 
-    ENSURES(is_transpose(M, N, A, B));
+  int Bi, Bj, i, j;
+  int ii, temp;
+
+  if (N == 32) {
+    for (Bi = 0; Bi < N; Bi += 8) {
+      for (Bj = 0; Bj < M; Bj += 8) {
+	for (i = Bi; i < Bi + 8; i++) {
+	  for (j = Bj; j < Bj + 8; j++) {
+	    if (i == j) {
+	      ii = i;
+	      temp = A[ii][ii];
+	    } else {
+	      B[j][i] = A[i][j];
+	    }
+	  }
+	  if (Bi == Bj) B[ii][ii] = temp;
+	}
+      }
+    }
+  }
+
+  else {
+    for (Bi = 0; Bi < N; i += 8) {
+      for (Bj = 0; Bj < M; j += 8) {
+	for (i = Bi; i < Bi+8; i++) {
+	  for (j = Bj; j < Bj+8; j++) {
+	    B[j][i] = A[i][j];
+	  }
+	}
+      }
+    }
+  }
+ 
+  ENSURES(is_transpose(M, N, A, B));
 }
 
 /* 
