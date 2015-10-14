@@ -52,12 +52,18 @@ void transpose_submit(int M, int N, int A[N][M], int B[M][N])
   }
 
   else {
-    for (Bi = 0; Bi < N; i += 8) {
-      for (Bj = 0; Bj < M; j += 8) {
-	for (i = Bi; i < Bi+8; i++) {
-	  for (j = Bj; j < Bj+8; j++) {
-	    B[j][i] = A[i][j];
+    for (Bi = 0; Bi < N; Bi += 16) {
+      for (Bj = 0; Bj < M; Bj += 16) {
+	for (i = Bi; (i < Bi + 16) && (i < N); i++) {
+	  for (j = Bj; (j < Bj + 16) && (j < M); j++) {
+	    if (i == j) {
+	      ii = i;
+	      temp = A[ii][ii];
+	    } else {
+	      B[j][i] = A[i][j];
+	    }
 	  }
+	  if (Bi == Bj) B[ii][ii] = temp;
 	}
       }
     }
