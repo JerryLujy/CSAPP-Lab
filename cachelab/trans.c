@@ -50,12 +50,28 @@ void transpose_submit(int M, int N, int A[N][M], int B[M][N])
       }
     }
   }
-
+  else if (N == 64) {
+    for (Bi = 0; Bi < N; Bi += 4) {
+      for (Bj = 0; Bj < M; Bj += 4) {
+	for (i = Bi; (i < Bi + 4) && (i < N); i++) {
+	  for (j = Bj; (j < Bj + 4) && (j < M); j++) {
+	    if (i == j) {
+	      ii = i;
+	      temp = A[ii][ii];
+	    } else {
+	      B[j][i] = A[i][j];
+	    }
+	  }
+	  if (Bi == Bj) B[ii][ii] = temp;
+	}
+      }
+    }
+  }
   else {
-    for (Bi = 0; Bi < N; Bi += 16) {
-      for (Bj = 0; Bj < M; Bj += 16) {
-	for (i = Bi; (i < Bi + 16) && (i < N); i++) {
-	  for (j = Bj; (j < Bj + 16) && (j < M); j++) {
+    for (Bi = 0; Bi < N; Bi += 18) {
+      for (Bj = 0; Bj < M; Bj += 18) {
+	for (i = Bi; (i < Bi + 18) && (i < N); i++) {
+	  for (j = Bj; (j < Bj + 18) && (j < M); j++) {
 	    if (i == j) {
 	      ii = i;
 	      temp = A[ii][ii];
