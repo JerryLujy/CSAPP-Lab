@@ -51,10 +51,74 @@ void transpose_submit(int M, int N, int A[N][M], int B[M][N])
     }
   }
   else if (N == 64) {
-    for (Bi = 0; Bi < N; Bi += 4) {
-      for (Bj = 0; Bj < M; Bj += 4) {
-	for (i = Bi; (i < Bi + 4) && (i < N); i++) {
-	  for (j = Bj; (j < Bj + 4) && (j < M); j++) {
+    // For 64*64 matrix transpose
+    for (Bi = 0; Bi < 64; Bi += 8) {
+      for (Bj = 0; Bj < 64; Bj += 8) {
+	// Find a 8*8 block at the bottom of B that serves as a temporary buffer for 8*8 blocks in A
+	// The starting col of this block should be different from Bi and Bj, because
+	// otherwise there will always be a conflict miss due to the memory pattern of this 64*64 matrix
+	temp = (Bj + 8) % 64;
+	if (temp == Bi) temp += 8;
+	// When we are at the second last block, use the last block as buffer instead of wrap back to 0;
+	if (Bi == 56 && Bj == 48) temp = 56;
+	// When we are at the last block, no need to buffer. Directly transpose it.
+	if (Bi == 56 && Bj == 56) continue;
+	
+	/* We now partition the 8*8 block into four 4*4 sub-blocks
+	   If we denote block    A[Bj][Bi] : |a1|a2|    B[Bi][Bj] : |b1|b2|
+	                                     |a3|a4|                |b3|b4|
+	   Then we know that b1 = a1', b2 = a3', b3 = a2', b4 = a4'
+	   The sub-blocks are first transferred into the buffer block in B,
+	   then transposed and stored to corresponding position in B*/
+	// Transfer a1 and a2 to buffer
+	for (j = 0; j < 4; j++) {
+	  for (i = 0; i < 8; i++) {
+	    B[56 + j][temp + i] = A[Bj + j][Bi + i];
+	  }
+	}
+	// Transfer a1' to b1
+	for (j = 0; j < 4; j++) {
+	  for (i = 0; i < 4; i++) {
+	    B[Bi + i][Bj + j] = B[56 + j][temp + i];
+	  }
+	}
+	// Transfer a3 to buffer
+	for (j = 4; j < 8; j++) {
+	  for (i = 0; i < 4; i++) {
+	    B[52 + j][temp + i] = A[Bj + j][Bi + i];
+	  }
+	}
+	// Transfer a3' to b2
+	for (j = 4; j < 8; j++) {
+	  for (i = 0; i < 4; i++) {
+	    B[Bi + i][Bj + j] = B[52 + j][temp + i];
+	  }
+	}
+	// Transfer a4 to buffer
+	for (j = 4; j < 8; j++) {
+	  for (i = 4; i < 8; i++) {
+	    B[52 + j][temp + i - 4] = A[Bj + j][Bi + i];
+	  }
+	}
+	// Transfer a2' to b3
+	for (j = 0; j < 4; j++) {
+	  for (i = 4; i < 8; i++) {
+	    B[Bi + i][Bj + j] = B[56 + j][temp + i];
+	  }
+	}
+	// Transfer a4' to b4
+	for (j = 4; j < 8; j++) {
+	  for (i = 4; i < 8; i++) {
+	    B[Bi + i][Bj + j] = B[52 + j][temp + i - 4];
+	  }
+	}
+      }
+    }
+    // Deal with the last block separately
+    for (Bi = 56; Bi < 64; Bi += 4) {
+      for (Bj = 56; Bj < 64; Bj += 4) {
+	for (i = Bi; i < Bi + 4; i++) {
+	  for (j = Bj; j < Bj + 4; j++) {
 	    if (i == j) {
 	      ii = i;
 	      temp = A[ii][ii];
