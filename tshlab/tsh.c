@@ -529,32 +529,43 @@ sigchld_handler(int sig)
   }
   Sigfillset(&mask_all);
   /* Reap all zombie childs */
-  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+  while ((pid = waitpid(-1, &status, WNOHANG|WUNTRACED)) > 0) {
     Sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
 
     /* Get the job that triggered SIGCHLD */
     struct job_t * job = getjobpid(job_list, pid);
     
-    if (verbose) {
+    if (verbose && WIFEXITED(status)) {
       memset(sbuf, '\0', MAXLINE);
-      sprintf(sbuf, "%s Job [%d] (%d) deleted\n", msghdr, job->jid, job->pid);
-      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
-      memset(sbuf, '\0', MAXLINE);
-      if (WIFEXITED(status)) 
-	sprintf(sbuf, "%s Job [%d] (%d) terminated OK (status %d)\n",
-		msghdr, job->jid, job->pid, WEXITSTATUS(status));
+      sprintf(sbuf, "%s Job [%d] (%d) terminated OK (status %d)\n",
+	      msghdr, job->jid, job->pid, WEXITSTATUS(status));
       Write(STDOUT_FILENO, sbuf, strlen(sbuf));
     }
-    /* Print the uncatched signal that caused termination */
+    /* If terminate, print the signal that caused termination */
     if (WIFSIGNALED(status)) {
       memset(sbuf, '\0', MAXLINE);
       sprintf(sbuf, "Job [%d] (%d) terminated by signal %d\n", 
 	      job->jid, job->pid, WTERMSIG(status));
       Write(STDOUT_FILENO, sbuf, strlen(sbuf));
     }
-
-    if (!deletejob(job_list, pid))
-      app_error("delete job error");
+    /* If stop, print the signal that caused stop  */
+    if (WIFSTOPPED(status)) {
+      memset(sbuf, '\0', MAXLINE);
+      sprintf(sbuf, "Job [%d] (%d) stopped by signal %d\n", 
+	      job->jid, job->pid, WSTOPSIG(status));
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+      job->state = ST;
+    }
+    else {
+      /* Unless the job is stopped, delete the job */
+      if (verbose) {
+	memset(sbuf, '\0', MAXLINE);
+	sprintf(sbuf, "%s Job [%d] (%d) deleted\n", msghdr, job->jid, job->pid);
+	Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+      }
+      if (!deletejob(job_list, pid))
+	app_error("delete job error");
+    }
 
     Sigprocmask(SIG_SETMASK, &prev_all, NULL);
   }
@@ -610,7 +621,30 @@ sigint_handler(int sig)
 void 
 sigtstp_handler(int sig) 
 {
-    return;
+  int preverrno = errno;
+  char * msghdr = "sigtstp_handler:";
+  if (verbose) {
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "%s entering\n", msghdr);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+  }
+  pid_t pid = fgpid(job_list);
+  /* Send SIGTSTP only if there is foreground job */
+  if (pid > 0) {
+    Kill(-pid, SIGTSTP);
+    if (verbose) {
+      memset(sbuf, '\0', MAXLINE);
+      sprintf(sbuf, "%s Job (%d) stoppeded\n", msghdr, pid);
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+    }
+  }
+  if (verbose) {
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "%s exiting\n", msghdr);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+  }
+  errno = preverrno;
+  return;
 }
 
 /*********************
