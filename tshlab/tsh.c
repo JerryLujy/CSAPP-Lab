@@ -533,8 +533,7 @@ sigchld_handler(int sig)
 
     Sigprocmask(SIG_SETMASK, &prev_all, NULL);
   }
-  if (errno != ECHILD)
-    unix_error("waitpid error");
+  
   if (verbose) {
     memset(sbuf, '\0', MAXLINE);
     sprintf(sbuf, "%s exiting\n", msghdr);
