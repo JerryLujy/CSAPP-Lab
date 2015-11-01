@@ -1,7 +1,7 @@
 /* 
  * tsh - A tiny shell program with job control
  * 
- * <Put your name and login ID here>
+ * Jieyu Lu     Andrew ID: jieyul1
  */
 #include <assert.h>
 #include <stdio.h>
@@ -181,6 +181,28 @@ main(int argc, char **argv)
     exit(0); /* control never reaches here */
 }
 
+/***********************************
+ * Process control wrapper functions
+ * (Adapted from csapp.c)
+ ***********************************/
+pid_t Fork(void) {
+  pid_t pid;
+  if ((pid = fork()) < 0)
+    unix_error("Fork error");
+  return pid;
+}
+
+void Execve(const char * filename, char * const argv[], char * const envp[]) {
+  if (execve(filename, argv, envp) < 0)
+    unix_error("Execve error");
+}
+
+pid_t Waitpid(pid_t pid, int * iptr, int options) {
+  pid_t retpid;
+  if ((retpid = waitpid(pid, iptr, options)) < 0)
+    unix_error("Waitpid error");
+  return retpid;
+}
 /* 
  * eval - Evaluate the command line that the user has just typed in
  * 
@@ -195,18 +217,40 @@ main(int argc, char **argv)
 void 
 eval(char *cmdline) 
 {
-    int bg;              /* should the job run in bg or fg? */
-    struct cmdline_tokens tok;
-
-    /* Parse command line */
-    bg = parseline(cmdline, &tok); 
-
-    if (bg == -1) /* parsing error */
-        return;
-    if (tok.argv[0] == NULL) /* ignore empty lines */
-        return;
-
+  int bg;              /* should the job run in bg or fg? */
+  struct cmdline_tokens tok;
+  
+  /* Parse command line */
+  bg = parseline(cmdline, &tok); 
+  
+  if (bg == -1) /* parsing error */
     return;
+  if (tok.argv[0] == NULL) /* ignore empty lines */
+    return;
+  if (tok.builtins == BUILTIN_QUIT) /* built in quit command */
+    exit(0);
+  if (tok.builtins == BUILTIN_JOBS) {/* built in jobs command */
+    /* Depending on whether or not the output file is specified,
+     * write list of jobs to stdout or outfile
+     */
+    if (tok.outfile == NULL) 
+      listjobs(job_list, 1);
+    return;
+  }
+  
+  pid_t pid = Fork();
+
+  /* Child runs user job */
+  if (pid == 0) {
+    Execve(tok.argv[0], tok.argv, environ);
+  }
+  
+  /* Shell wait for the foreground job to terminate */
+  if (!bg) {
+    int status;
+    Waitpid(pid, &status, 0);
+  }
+  return;
 }
 
 /* 
