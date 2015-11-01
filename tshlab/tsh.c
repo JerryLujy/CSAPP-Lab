@@ -197,12 +197,73 @@ void Execve(const char * filename, char * const argv[], char * const envp[]) {
     unix_error("Execve error");
 }
 
-pid_t Waitpid(pid_t pid, int * iptr, int options) {
-  pid_t retpid;
-  if ((retpid = waitpid(pid, iptr, options)) < 0)
-    unix_error("Waitpid error");
-  return retpid;
+/*******************************
+ * Unix signal wrapper functions
+ * (Adapted from csapp.c)
+ *******************************/
+void Sigprocmask(int how, sigset_t * set, sigset_t * oldset) {
+  if (sigprocmask(how, set, oldset) < 0)
+    unix_error("Sigprocmask error");
 }
+
+void Sigemptyset(sigset_t * set) {
+  if (sigemptyset(set) < 0)
+    unix_error("Sigemptyset error");
+}
+
+void Sigfillset(sigset_t * set) {
+  if (sigfillset(set) < 0)
+    unix_error("Sigfillset error");
+}
+
+void Sigaddset(sigset_t * set, int signum) {
+  if (sigaddset(set, signum) < 0)
+    unix_error("Sigaddset error");
+}
+
+void Sigdelset(sigset_t * set, int signum) {
+  if (sigdelset(set, signum) < 0)
+    unix_error("Sigdelset error");
+}
+
+/****************************
+ * Unix I/O wrapper functions
+ * (Adapted from csapp.c)
+ ****************************/
+int Open(const char * pathname, int flags, mode_t mode) {
+  int rc;
+  if ((rc = open(pathname, flags, mode)) < 0)
+    unix_error("Open error");
+  return rc;
+}
+
+ssize_t Read(int fd, void * buf, size_t count) {
+  ssize_t rc;
+  if ((rc = read(fd, buf, count)) < 0)
+    unix_error("Read error");
+  return rc;
+}
+
+ssize_t Write(int fd, void * buf, size_t count) {
+  ssize_t rc;
+  if ((rc = write(fd, buf, count)) < 0)
+    unix_error("Write error");
+  return rc;
+}
+
+void Close(int fd) {
+  int rc;
+  if ((rc = close(fd)) < 0)
+    unix_error("Close error");
+}
+
+int Dup2(int fd1, int fd2) {
+  int rc;
+  if ((rc = dup2(fd1, fd2)) < 0)
+    unix_error("Dup2 error");
+  return rc;
+}
+
 /* 
  * eval - Evaluate the command line that the user has just typed in
  * 
@@ -230,26 +291,46 @@ eval(char *cmdline)
   if (tok.builtins == BUILTIN_QUIT) /* built in quit command */
     exit(0);
   if (tok.builtins == BUILTIN_JOBS) {/* built in jobs command */
-    /* Depending on whether or not the output file is specified,
-     * write list of jobs to stdout or outfile
-     */
-    if (tok.outfile == NULL) 
-      listjobs(job_list, 1);
+    listjobs(job_list, STDOUT_FILENO);
     return;
   }
+  /* Prepare signal masks */
+  sigset_t mask_all, mask_child, mask_prev;
+  Sigfillset(&mask_all);
+  Sigemptyset(&mask_child);
+  Sigaddset(&mask_child, SIGCHLD);
+  Sigaddset(&mask_child, SIGINT);
+  Sigaddset(&mask_child, SIGTSTP);
   
+  /* Block SIGCHLD before forking */
+  Sigprocmask(SIG_BLOCK, &mask_child, &mask_prev);
   pid_t pid = Fork();
 
   /* Child runs user job */
   if (pid == 0) {
+    Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
     Execve(tok.argv[0], tok.argv, environ);
   }
-  
-  /* Shell wait for the foreground job to terminate */
-  if (!bg) {
-    int status;
-    Waitpid(pid, &status, 0);
+
+  /* Parent add job to the job list */
+  Sigprocmask(SIG_BLOCK, &mask_all, NULL);
+  if (!addjob(job_list, pid, bg?BG:FG, cmdline))
+    app_error("add job error");
+
+  /* Print job if it is background */
+  if (bg) {
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "[%d] (%d) %s\n", pid2jid(pid), pid, cmdline);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
   }
+ 
+  /* Shell wait for the foreground job send SIGCHLD */
+  if (!bg) {
+    while (fgpid(job_list))
+      sigsuspend(&mask_prev);
+  }
+  Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
+
   return;
 }
 
@@ -416,7 +497,51 @@ parseline(const char *cmdline, struct cmdline_tokens *tok)
 void 
 sigchld_handler(int sig) 
 {
-    return;
+  int preverrno = errno;
+  sigset_t mask_all, prev_all;
+  pid_t pid;
+  int status;
+  char * msghdr = "sigchld_handler:";
+
+  if (verbose) {
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "%s entering\n", msghdr);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+  }
+  Sigfillset(&mask_all);
+  /* Reap all zombie childs */
+  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    Sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
+
+    if (verbose) {
+      struct job_t * job = getjobpid(job_list, pid);
+      memset(sbuf, '\0', MAXLINE);
+      sprintf(sbuf, "%s Job [%d] (%d) deleted\n", msghdr, job->jid, job->pid);
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+      memset(sbuf, '\0', MAXLINE);
+      if (WIFEXITED(status)) 
+	sprintf(sbuf, "%s Job [%d] (%d) terminated OK (status %d)\n",
+		msghdr, job->jid, job->pid, WEXITSTATUS(status));
+      else
+	sprintf(sbuf, "%s Job [%d] (%d) terminated abnormally (status %d)\n",
+		msghdr, job->jid, job->pid, WEXITSTATUS(status));
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+    }
+
+    if (!deletejob(job_list, pid))
+      app_error("delete job error");
+
+    Sigprocmask(SIG_SETMASK, &prev_all, NULL);
+  }
+  if (errno != ECHILD)
+    unix_error("waitpid error");
+  if (verbose) {
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "%s exiting\n", msghdr);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+  }
+  errno = preverrno;
+  return;
 }
 
 /* 
