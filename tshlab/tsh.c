@@ -192,9 +192,15 @@ pid_t Fork(void) {
   return pid;
 }
 
-void Execve(const char * filename, char * const argv[], char * const envp[]) {
-  if (execve(filename, argv, envp) < 0)
-    unix_error("Execve error");
+void Kill(pid_t pid, int signum) {
+  int rc;
+  if ((rc = kill(pid, signum)) < 0)
+    unix_error("Kill error");
+}
+
+void Setpgid(pid_t pid, pid_t pgid) {
+  if (setpgid(pid, pgid) < 0)
+    unix_error("Setpgid error");
 }
 
 /*******************************
@@ -309,7 +315,15 @@ eval(char *cmdline)
   /* Child runs user job */
   if (pid == 0) {
     Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
-    Execve(tok.argv[0], tok.argv, environ);
+    /* Restore default handlers that are ignored by shell */
+    Signal(SIGTTIN, SIG_DFL);
+    Signal(SIGTTOU, SIG_DFL);
+    /* Put the child in a different process group */
+    Setpgid(0, 0);
+    if (execve(tok.argv[0], tok.argv, environ) < 0) {
+      fprintf(stderr, "%s: command not found\n", tok.argv[0]);
+      exit(1);
+    }
   }
 
   /* Parent add job to the job list */
@@ -325,9 +339,14 @@ eval(char *cmdline)
   }
  
   /* Shell wait for the foreground job send SIGCHLD */
-  if (!bg) {
+  else {
     while (fgpid(job_list))
       sigsuspend(&mask_prev);
+    if (verbose) {
+      memset(sbuf, '\0', MAXLINE);
+      sprintf(sbuf, "Process (%d) no longer the fg process\n", pid);
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+    }
   }
   Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
 
@@ -513,8 +532,10 @@ sigchld_handler(int sig)
   while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
     Sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
 
+    /* Get the job that triggered SIGCHLD */
+    struct job_t * job = getjobpid(job_list, pid);
+    
     if (verbose) {
-      struct job_t * job = getjobpid(job_list, pid);
       memset(sbuf, '\0', MAXLINE);
       sprintf(sbuf, "%s Job [%d] (%d) deleted\n", msghdr, job->jid, job->pid);
       Write(STDOUT_FILENO, sbuf, strlen(sbuf));
@@ -522,9 +543,13 @@ sigchld_handler(int sig)
       if (WIFEXITED(status)) 
 	sprintf(sbuf, "%s Job [%d] (%d) terminated OK (status %d)\n",
 		msghdr, job->jid, job->pid, WEXITSTATUS(status));
-      else
-	sprintf(sbuf, "%s Job [%d] (%d) terminated abnormally (status %d)\n",
-		msghdr, job->jid, job->pid, WEXITSTATUS(status));
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+    }
+    /* Print the uncatched signal that caused termination */
+    if (WIFSIGNALED(status)) {
+      memset(sbuf, '\0', MAXLINE);
+      sprintf(sbuf, "Job [%d] (%d) terminated by signal %d\n", 
+	      job->jid, job->pid, WTERMSIG(status));
       Write(STDOUT_FILENO, sbuf, strlen(sbuf));
     }
 
@@ -551,7 +576,30 @@ sigchld_handler(int sig)
 void 
 sigint_handler(int sig) 
 {
-    return;
+  int preverrno = errno;
+  char * msghdr = "sigint_handler:";
+  if (verbose) {
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "%s entering\n", msghdr);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+  }
+  pid_t pid = fgpid(job_list);
+  /* Send SIGINT only if there is foreground job */
+  if (pid > 0) {
+    Kill(-pid, SIGINT);
+    if (verbose) {
+      memset(sbuf, '\0', MAXLINE);
+      sprintf(sbuf, "%s Job (%d) killed\n", msghdr, pid);
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+    }
+  }
+  if (verbose) {
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "%s exiting\n", msghdr);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+  }
+  errno = preverrno;
+  return;
 }
 
 /*
