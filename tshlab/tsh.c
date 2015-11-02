@@ -300,15 +300,19 @@ eval(char *cmdline)
     listjobs(job_list, STDOUT_FILENO);
     return;
   }
-  if (tok.builtins == BUILTIN_BG) {/* built in bg command */
+  /* Built in bg/fg command */
+  struct job_t * job = NULL;// The job, if any, referenced by bg/fg
+
+  if (tok.builtins == BUILTIN_BG || 
+      tok.builtins == BUILTIN_FG) {
     if (!tok.argv[1]) {
-      fprintf(stderr, "bg command requires PID or %%jobid argument\n");
+      fprintf(stderr, "%s command requires PID or %%jobid argument\n", 
+	      (tok.builtins == BUILTIN_BG) ? "bg" : "fg");
       return;
     }
     pid_t pid;
     int jid;
-    struct job_t * job;
-
+    /* Parse pid or jid in the command line input */
     if ((pid = atoi(tok.argv[1])) > 0) {
       job = getjobpid(job_list, pid);
       if (job == NULL) {
@@ -322,15 +326,22 @@ eval(char *cmdline)
 	return;
       }
     } else {
-      fprintf(stderr, "bg: argument must be a PID or %%jobid\n");
+      fprintf(stderr, "%s: argument must be a PID or %%jobid\n",
+	      (tok.builtins == BUILTIN_BG) ? "bg" : "fg");
       return;
     }
-    job->state = BG;
-    memset(sbuf, '\0', MAXLINE);
-    sprintf(sbuf, "[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
-    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
-    Kill(job->pid, SIGCONT);
-    return;
+    if (job && tok.builtins == BUILTIN_BG) {
+      job->state = BG;
+      memset(sbuf, '\0', MAXLINE);
+      sprintf(sbuf, "[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
+      Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+      Kill(job->pid, SIGCONT);
+      return;
+    } 
+    else if (job && tok.builtins == BUILTIN_FG) {
+      job->state = FG;
+      Kill(job->pid, SIGCONT);
+    }
   }
 
   /* Prepare signal masks */
@@ -343,6 +354,15 @@ eval(char *cmdline)
   
   /* Block SIGCHLD before forking */
   Sigprocmask(SIG_BLOCK, &mask_child, &mask_prev);
+
+  if (tok.builtins == BUILTIN_FG) {
+    Sigprocmask(SIG_BLOCK, &mask_all, NULL);
+    while (fgpid(job_list))
+      sigsuspend(&mask_prev);
+    Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
+    return;
+  }
+  
   pid_t pid = Fork();
 
   /* Child runs user job */
