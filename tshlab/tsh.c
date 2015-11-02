@@ -300,6 +300,39 @@ eval(char *cmdline)
     listjobs(job_list, STDOUT_FILENO);
     return;
   }
+  if (tok.builtins == BUILTIN_BG) {/* built in bg command */
+    if (!tok.argv[1]) {
+      fprintf(stderr, "bg command requires PID or %%jobid argument\n");
+      return;
+    }
+    pid_t pid;
+    int jid;
+    struct job_t * job;
+
+    if ((pid = atoi(tok.argv[1])) > 0) {
+      job = getjobpid(job_list, pid);
+      if (job == NULL) {
+	fprintf(stderr, "(%d): No such process\n", pid);
+	return;
+      }
+    } else if (*(tok.argv[1]) == '%' && (jid = atoi(tok.argv[1]+1)) > 0) {
+      job = getjobjid(job_list, jid);
+      if (job == NULL) {
+	fprintf(stderr, "%%%d: No such job\n", jid);
+	return;
+      }
+    } else {
+      fprintf(stderr, "bg: argument must be a PID or %%jobid\n");
+      return;
+    }
+    job->state = BG;
+    memset(sbuf, '\0', MAXLINE);
+    sprintf(sbuf, "[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
+    Write(STDOUT_FILENO, sbuf, strlen(sbuf));
+    Kill(job->pid, SIGCONT);
+    return;
+  }
+
   /* Prepare signal masks */
   sigset_t mask_all, mask_child, mask_prev;
   Sigfillset(&mask_all);
