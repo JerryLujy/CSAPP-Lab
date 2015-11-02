@@ -1,7 +1,17 @@
 /* 
  * tsh - A tiny shell program with job control
  * 
- * Jieyu Lu     Andrew ID: jieyul1
+ * This program provides basic job control and I/O redirection 
+ * functionality as a Unix shell. Pipe is not supported.
+ *
+ * Four built-in commands are provided:
+ *
+ * quit: quit the shell
+ * jobs: list the jobs running or stopped in background
+ * bg <%jid/PID>: continue running job specified by jid or PID in background. 
+ * fg <%jid/PID>: continue running job specified by jid or PID on foreground. 
+ *
+ * Author: Jieyu Lu     Andrew ID: jieyul1
  */
 #include <assert.h>
 #include <stdio.h>
@@ -227,11 +237,6 @@ void Sigaddset(sigset_t * set, int signum) {
     unix_error("Sigaddset error");
 }
 
-void Sigdelset(sigset_t * set, int signum) {
-  if (sigdelset(set, signum) < 0)
-    unix_error("Sigdelset error");
-}
-
 /****************************
  * Unix I/O wrapper functions
  * (Adapted from csapp.c)
@@ -240,13 +245,6 @@ int Open(const char * pathname, int flags, mode_t mode) {
   int rc;
   if ((rc = open(pathname, flags, mode)) < 0)
     unix_error("Open error");
-  return rc;
-}
-
-ssize_t Read(int fd, void * buf, size_t count) {
-  ssize_t rc;
-  if ((rc = read(fd, buf, count)) < 0)
-    unix_error("Read error");
   return rc;
 }
 
@@ -270,6 +268,26 @@ int Dup2(int fd1, int fd2) {
   return rc;
 }
 
+/*
+ * closeFileAndRestoredFd - does the cleanup work before returning from eval
+ *
+ * Closes file opened for I/O redirection
+ * and restore file descriptor for stdin and stdout
+ */
+
+void closeFileAndRestoreFd(struct cmdline_tokens * tok, int infd, int outfd, 
+			   int savedSTDIN_FILENO, 
+			   int savedSTDOUT_FILENO) {
+  if (tok->infile != NULL) {
+    Close(infd);
+    Dup2(savedSTDIN_FILENO, STDIN_FILENO);
+  }
+  if (tok->outfile != NULL) {
+    Close(outfd);
+    Dup2(savedSTDOUT_FILENO, STDOUT_FILENO);
+  }
+}
+
 /* 
  * eval - Evaluate the command line that the user has just typed in
  * 
@@ -287,9 +305,10 @@ eval(char *cmdline)
   int bg;              /* should the job run in bg or fg? */
   struct cmdline_tokens tok;
   
-  /* File descriptors for this command */
-  int savedSTDIN_FILENO = dup(STDIN_FILENO);
-  int savedSTDOUT_FILENO = dup(STDOUT_FILENO);
+  /* If I/O redirected, need to store the original stdin/stdout descriptor */
+  int savedSTDIN_FILENO, savedSTDOUT_FILENO;
+  
+  /* Opened file descriptors for this command */
   int infd, outfd;
 
   /* The job, if any, referenced by bg/fg */
@@ -315,62 +334,69 @@ eval(char *cmdline)
     exit(0);
   if (tok.infile != NULL) {/* input redirected */
     infd = Open(tok.infile, O_RDONLY, 0);
+    savedSTDIN_FILENO = dup(STDIN_FILENO);
     Dup2(infd, STDIN_FILENO);
   }
   if (tok.outfile != NULL) {/* output redirected */
     outfd = Open(tok.outfile, O_WRONLY|O_CREAT|O_TRUNC, 0);
+    savedSTDOUT_FILENO = dup(STDOUT_FILENO);
     Dup2(outfd, STDOUT_FILENO);
   }
   if (tok.builtins == BUILTIN_JOBS) {/* built in jobs command */
     listjobs(job_list, STDOUT_FILENO);
+    /* After listing jobs, restore file descriptors and close files */
+    closeFileAndRestoreFd(&tok, infd, outfd, 
+			  savedSTDIN_FILENO, savedSTDOUT_FILENO);
     return;
   }
 
   /* Built in bg/fg command */
   if (tok.builtins == BUILTIN_BG || 
       tok.builtins == BUILTIN_FG) {
-    if (!tok.argv[1]) {
-      fprintf(stderr, "%s command requires PID or %%jobid argument\n", 
-	      (tok.builtins == BUILTIN_BG) ? "bg" : "fg");
-      return;
-    }
     pid_t pid;
     int jid;
     /* Parse pid or jid in the command line input */
-    if ((pid = atoi(tok.argv[1])) > 0) {
+    if (!tok.argv[1]) {
+      fprintf(stderr, "%s command requires PID or %%jobid argument\n", 
+	      (tok.builtins == BUILTIN_BG) ? "bg" : "fg");
+    } 
+    else if ((pid = atoi(tok.argv[1])) > 0) {
       job = getjobpid(job_list, pid);
       if (job == NULL) {
 	fprintf(stderr, "(%d): No such process\n", pid);
-	return;
       }
-    } else if (*(tok.argv[1]) == '%' && (jid = atoi(tok.argv[1]+1)) > 0) {
+    } 
+    else if (*(tok.argv[1]) == '%' && (jid = atoi(tok.argv[1]+1)) > 0) {
       job = getjobjid(job_list, jid);
       if (job == NULL) {
 	fprintf(stderr, "%%%d: No such job\n", jid);
-	return;
       }
-    } else {
+    } 
+    else {
       fprintf(stderr, "%s: argument must be a PID or %%jobid\n",
 	      (tok.builtins == BUILTIN_BG) ? "bg" : "fg");
-      return;
     }
-    if (tok.builtins == BUILTIN_BG) {
+    /* If A vaid job is found, send a continue signal to that job */
+    if (job && tok.builtins == BUILTIN_BG) {
       job->state = BG;
       memset(sbuf, '\0', MAXLINE);
       sprintf(sbuf, "[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
       Write(STDOUT_FILENO, sbuf, strlen(sbuf));
       Kill(job->pid, SIGCONT);
-      return;
     } 
-    else {
+    else if (job && tok.builtins == BUILTIN_FG) {
       job->state = FG;
       Kill(job->pid, SIGCONT);
+      /* Wait for job finish. Block all signals before using sigsuspend */
       Sigprocmask(SIG_BLOCK, &mask_all, NULL);
       while (fgpid(job_list))
 	sigsuspend(&mask_prev);
       Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
-      return;
     }
+    /* After finishing bg or fg, restore file descriptors and close files */
+    closeFileAndRestoreFd(&tok, infd, outfd, 
+			  savedSTDIN_FILENO, savedSTDOUT_FILENO);
+    return;
   }
   
   /* Block SIGCHLD before forking */
@@ -417,12 +443,8 @@ eval(char *cmdline)
   Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
 
   /* Before return, close files and restore the file descriptors */
-  Dup2(savedSTDIN_FILENO, STDIN_FILENO);
-  Dup2(savedSTDOUT_FILENO, STDOUT_FILENO);
-  if (tok.infile != NULL)
-    Close(infd);
-  if (tok.outfile != NULL)
-    Close(outfd);
+  closeFileAndRestoreFd(&tok, infd, outfd, 
+			savedSTDIN_FILENO, savedSTDOUT_FILENO);
   return;
 }
 
