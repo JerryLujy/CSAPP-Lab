@@ -287,6 +287,23 @@ eval(char *cmdline)
   int bg;              /* should the job run in bg or fg? */
   struct cmdline_tokens tok;
   
+  /* File descriptors for this command */
+  int savedSTDIN_FILENO = dup(STDIN_FILENO);
+  int savedSTDOUT_FILENO = dup(STDOUT_FILENO);
+  int infd, outfd;
+
+  /* The job, if any, referenced by bg/fg */
+  struct job_t * job = NULL;
+
+  /* Signal masks */
+  sigset_t mask_all, mask_child, mask_prev;
+  Sigfillset(&mask_all);
+  Sigemptyset(&mask_child);
+  Sigemptyset(&mask_prev);
+  Sigaddset(&mask_child, SIGCHLD);
+  Sigaddset(&mask_child, SIGINT);
+  Sigaddset(&mask_child, SIGTSTP);
+  
   /* Parse command line */
   bg = parseline(cmdline, &tok); 
   
@@ -296,13 +313,20 @@ eval(char *cmdline)
     return;
   if (tok.builtins == BUILTIN_QUIT) /* built in quit command */
     exit(0);
+  if (tok.infile != NULL) {/* input redirected */
+    infd = Open(tok.infile, O_RDONLY, 0);
+    Dup2(infd, STDIN_FILENO);
+  }
+  if (tok.outfile != NULL) {/* output redirected */
+    outfd = Open(tok.outfile, O_WRONLY|O_CREAT|O_TRUNC, 0);
+    Dup2(outfd, STDOUT_FILENO);
+  }
   if (tok.builtins == BUILTIN_JOBS) {/* built in jobs command */
     listjobs(job_list, STDOUT_FILENO);
     return;
   }
-  /* Built in bg/fg command */
-  struct job_t * job = NULL;// The job, if any, referenced by bg/fg
 
+  /* Built in bg/fg command */
   if (tok.builtins == BUILTIN_BG || 
       tok.builtins == BUILTIN_FG) {
     if (!tok.argv[1]) {
@@ -330,7 +354,7 @@ eval(char *cmdline)
 	      (tok.builtins == BUILTIN_BG) ? "bg" : "fg");
       return;
     }
-    if (job && tok.builtins == BUILTIN_BG) {
+    if (tok.builtins == BUILTIN_BG) {
       job->state = BG;
       memset(sbuf, '\0', MAXLINE);
       sprintf(sbuf, "[%d] (%d) %s\n", job->jid, job->pid, job->cmdline);
@@ -338,30 +362,19 @@ eval(char *cmdline)
       Kill(job->pid, SIGCONT);
       return;
     } 
-    else if (job && tok.builtins == BUILTIN_FG) {
+    else {
       job->state = FG;
       Kill(job->pid, SIGCONT);
+      Sigprocmask(SIG_BLOCK, &mask_all, NULL);
+      while (fgpid(job_list))
+	sigsuspend(&mask_prev);
+      Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
+      return;
     }
   }
-
-  /* Prepare signal masks */
-  sigset_t mask_all, mask_child, mask_prev;
-  Sigfillset(&mask_all);
-  Sigemptyset(&mask_child);
-  Sigaddset(&mask_child, SIGCHLD);
-  Sigaddset(&mask_child, SIGINT);
-  Sigaddset(&mask_child, SIGTSTP);
   
   /* Block SIGCHLD before forking */
   Sigprocmask(SIG_BLOCK, &mask_child, &mask_prev);
-
-  if (tok.builtins == BUILTIN_FG) {
-    Sigprocmask(SIG_BLOCK, &mask_all, NULL);
-    while (fgpid(job_list))
-      sigsuspend(&mask_prev);
-    Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
-    return;
-  }
   
   pid_t pid = Fork();
 
@@ -403,6 +416,13 @@ eval(char *cmdline)
   }
   Sigprocmask(SIG_SETMASK, &mask_prev, NULL);
 
+  /* Before return, close files and restore the file descriptors */
+  Dup2(savedSTDIN_FILENO, STDIN_FILENO);
+  Dup2(savedSTDOUT_FILENO, STDOUT_FILENO);
+  if (tok.infile != NULL)
+    Close(infd);
+  if (tok.outfile != NULL)
+    Close(outfd);
   return;
 }
 
