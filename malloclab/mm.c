@@ -47,8 +47,8 @@
 #define PACK(size, alloc) ((size) | (alloc))
 
 /* Given ptr p, read and write a word at this address */
-#define GET(p) (*(unsigned long *)(p))
-#define PUT(p, val) (*(unsigned long *)(p) = (val))
+#define GET(p) (*(unsigned int *)(p))
+#define PUT(p, val) (GET(p) = (val))
 
 /* Given ptr p, read size, alloc and predalloc info from this address */
 #define GET_SIZE(p) (GET(p) & ~0x7)
@@ -59,16 +59,30 @@
 #define HDRP(bp) ((char *)(bp) - WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(bp) - DSIZE)
 
-/* Given block ptr bp, compute address of next and previous blocks */
-#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE((char *)(bp) - WSIZE))
-#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE))
+/* Given block ptr bp, compute address of predecessor and successor blocks */
+#define SUCC_BLKP(bp) ((char *)(bp) + GET_SIZE((char *)(bp) - WSIZE))
+#define PRED_BLKP(bp) ((char *)(bp) - GET_SIZE((char *)(bp) - DSIZE))
+
+/* Given block ptr bp, set or reset the predalloc info in successor block */
+#define SET_SUCC_PREDALLOC(bp) (GET(HDRP(SUCC_BLKP(bp))) |= 0x2)
+#define RESET_SUCC_PREDALLOC(bp) (GET(HDRP(SUCC_BLKP(bp))) &= ~0x2)
+
+/* Given (free) block ptr bp, encode prev and next free list block address here */
+#define SET_NEXT_FREE_BLKP(bp, ptr) PUT(bp, ptr_to_offst(ptr))
+#define SET_PREV_FREE_BLKP(bp, ptr) PUT((bp + WSIZE), ptr_to_offst(ptr))
+
+/* Given (free) block ptr bp, decode prev and next free list block address */
+#define GET_NEXT_FREE_BLKP(bp) offst_to_ptr(GET(bp))
+#define GET_PREV_FREE_BLKP(bp) offst_to_ptr(GET(bp + WSIZE))
 
 /* Global variables */
-static char * heap_listp = NULL;   /* Pointer to first block */
-static size_t * free_listp = NULL; /* Pointer to first free block */
+static char * heap_listp = NULL;     /* Pointer to first block */
+static char * free_list_hp = NULL;   /* Pointer to head of free list */
+static char * free_list_tp = NULL;   /* Pointer to tail of free list */
 
 /* Helper functions */
 static void * extend_heap(size_t words);
+static void insert_free_block(char * bp);
 
 /*
  * Initialize: return -1 on error, 0 on success.
@@ -81,12 +95,16 @@ int mm_init(void) {
   PUT(heap_listp, 0);                           /* Alignment padding */
   PUT(heap_listp +     WSIZE, PACK(DSIZE, 1));  /* Prologue header */
   PUT(heap_listp + 2 * WSIZE, PACK(DSIZE, 1));  /* Prologue footer */
-  PUT(heap_listp + 3 * WSIZE, PACK(0, 1));      /* Epilogue header */
+  PUT(heap_listp + 3 * WSIZE, PACK(0,     1));  /* Epilogue header */
 
   heap_listp += 2 * WSIZE;
 
   /* Extend the heap with CHUNKSIZE bytes as initial preparation */
+  if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
+    return -1;
 
+  /* Set the predalloc info in the first free block */
+  SET_SUCC_PREDALLOC(heap_listp);
   return 0;
 }
 
@@ -120,22 +138,68 @@ void *calloc (size_t nmemb, size_t size) {
   return NULL;
 }
 
-/* extend_heap - extend the heap with free block and return the block pointer */
-static void * extend_heap(size_t words) {
+/* Convert back and forth between 64-bit pointer and 
+ * 32-bit offset value w.r.t. heap first block pointer
+ * (Given that the size of heap is at most 2^32 bytes)
+ */
+static inline unsigned int ptr_to_offst(char * ptr) {
+  return (ptr == NULL) ? 0 : (unsigned int)(ptr - heap_listp);
+}
+static inline char * offst_to_ptr(unsigned int offst) {
+  return (offst == 0) ? NULL : (char *)(offst + (unsigned long)heap_listp);
+}
+
+/* 
+ * extend_heap
+ *
+ * Extend the heap with free block of w words and return the block pointer 
+ */
+static void * extend_heap(size_t w) {
   char * bp;
   size_t size;
   
   /* Allocate an even number of words to maintain alignment */
-  size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+  size = (w % 2) ? (w + 1) * WSIZE : w * WSIZE;
   if ((bp = mem_sbrk(size)) == (char *)-1)
     return NULL;
 
   /* Initiate the header and footer of the new free block and update epilogue */
   PUT(HDRP(bp), PACK(size, 0));        /* New free block header */
   PUT(FTRP(bp), PACK(size, 0));        /* New free block footer */
-  PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1)); /* New epilogue header */
+  PUT(HDRP(SUCC_BLKP(bp)), PACK(0,1)); /* New epilogue header */
 
-  
+  insert_free_block(bp);
+  return bp;
+}
+
+/* 
+ * insert_free_block
+ *
+ * Insert a new free block pointed to by bp to the free list.
+ */
+static void insert_free_block(char * bp) {
+  if (free_list_hp == NULL) {
+    free_list_hp = bp;
+    free_list_tp = bp;
+    return;
+  }
+  if (bp < free_list_hp) {/* insert this block at the front of the free list */
+    SET_NEXT_FREE_BLKP(bp, free_list_hp);
+    SET_PREV_FREE_BLKP(free_list_hp, bp);
+    free_list_hp = bp;
+  } else if (bp > free_list_tp) {/* insert this block at the end of the free list */
+    SET_PREV_FREE_BLKP(bp, free_list_tp);
+    SET_NEXT_FREE_BLKP(free_list_tp, bp);
+    free_list_tp = bp;
+  } else {/* insert this block somewhere in the free list */
+    char * temp = free_list_hp;
+    while (temp < bp)
+      temp = GET_NEXT_FREE_BLKP(temp);
+    SET_NEXT_FREE_BLKP(bp, temp);
+    SET_PREV_FREE_BLKP(bp, GET_PREV_FREE_BLKP(temp));
+    SET_PREV_FREE_BLKP(temp, bp);
+    SET_NEXT_FREE_BLKP(GET_PREV_FREE_BLKP(temp), bp);
+  }
 }
 
 /*
