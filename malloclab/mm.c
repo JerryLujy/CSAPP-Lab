@@ -197,19 +197,103 @@ void free (void * bp) {
 }
 
 /*
- * realloc - you may want to look at mm-naive.c
+ * realloc
+ *
+ * Change the size of an allocated block pointed to by ptr to size
  */
-void *realloc(void *oldptr, size_t size) {
-  return NULL;
+void * realloc(void * ptr, size_t size) {
+  /* Null ptr equivalent to malloc(size) */
+  if (ptr == NULL) {
+    dbg_printf("\n***** Realloc Request (NULL, %zu) Do malloc instead *****\n", size);
+    return malloc(size);
+  }
+  /* Zero size equivalent to free(ptr) */
+  if (size == 0) {
+    dbg_printf("\n***** Realloc Request (ptr, 0) Do free instead *****\n");
+    free(ptr);
+    return NULL;
+  }
+  
+  size_t oldsize = GET_SIZE(HDRP(ptr));
+  size_t asize;
+  
+  if (size <= DSIZE)
+    asize = 2 * DSIZE;
+  else
+    asize = ALIGN(size + WSIZE);
+  dbg_printf("\n***** Realloc Request (ptr = %p, oldsize = %zu, "
+	     "new size = %zu, round to %zu) *****\n",
+	     ptr, oldsize, size, asize);
+
+  if (oldsize >= asize) {
+    /* Realloc is shrinking the block size */
+    if ((oldsize - asize) > 2 * DSIZE) {
+      /* Enough space for another block. Split it */
+      if (!GET_ALLOC(HDRP(SUCC_BLKP(ptr)))) {
+	/* Successor block is free, "coalesce" */
+	oldsize += GET_SIZE(HDRP(SUCC_BLKP(ptr)));
+	delete_free_block(SUCC_BLKP(ptr));
+      }
+      PUT_SOFT(HDRP(ptr), PACK(asize, 1));
+      void * freebp = SUCC_BLKP(ptr);
+      PUT(HDRP(freebp), PACK(oldsize - asize, 0));
+      PUT(FTRP(freebp), PACK(oldsize - asize, 0));
+      SET_SUCC_PREDALLOC(ptr);
+      insert_free_block(freebp);
+    } else {
+      /* Not enough space */
+      PUT_SOFT(HDRP(ptr), PACK(oldsize, 1));
+      SET_SUCC_PREDALLOC(ptr);
+    }
+    checkheap(__LINE__);
+    return ptr;
+  }
+  else if (!GET_ALLOC(HDRP(SUCC_BLKP(ptr))) &&
+	   GET_SIZE(HDRP(SUCC_BLKP(ptr))) + oldsize > asize) {
+    /* Realloc is expanding the block size
+     * But successor block is free and big enough */
+    char * next = SUCC_BLKP(ptr);
+    delete_free_block(next);
+
+    size_t freesize = GET_SIZE(HDRP(next)) + oldsize - asize;
+    /* Same thing as above */
+    if (freesize > 2 * DSIZE) {
+      PUT_SOFT(HDRP(ptr), PACK(asize, 1));
+      void * freebp = SUCC_BLKP(ptr);
+      PUT(HDRP(freebp), PACK(freesize, 0));
+      PUT(FTRP(freebp), PACK(freesize, 0));
+      SET_SUCC_PREDALLOC(ptr);
+      insert_free_block(freebp);
+    } else {
+      PUT_SOFT(HDRP(ptr), PACK(GET_SIZE(HDRP(next)) + oldsize, 1));
+      SET_SUCC_PREDALLOC(ptr);
+    }
+    checkheap(__LINE__);
+    return ptr;
+  }
+  
+  /* If we reach here, need to malloc and free */
+  dbg_printf("size is %zu\n", size);
+  void * newptr = malloc(size);
+  memcpy(newptr, ptr, size);
+  free(ptr);
+
+  checkheap(__LINE__);
+  
+  return newptr;
 }
 
 /*
- * calloc - you may want to look at mm-naive.c
- * This function is not tested by mdriver, but it is
- * needed to run the traces.
+ * calloc
+ *
+ * Allocates memory for an array of nmemb elements, each of size bytes
+ * Memory is set to zero
  */
-void *calloc (size_t nmemb, size_t size) {
-  return NULL;
+void * calloc (size_t nmemb, size_t size) {
+  size_t total = nmemb * size;
+  void * newptr = malloc(total);
+  memset(newptr, 0, total);
+  return newptr;
 }
 
 /* Convert back and forth between 64-bit pointer and 
@@ -385,14 +469,14 @@ static void delete_free_block(char * bp) {
     free_list_hp = free_list_tp = NULL;
   } else if (bp == free_list_hp) {/* Removing head of the free list */
     free_list_hp = GET_NEXT_FREE_BLKP(bp);
+    SET_PREV_FREE_BLKP(GET_NEXT_FREE_BLKP(bp), NULL);
   } else if (bp == free_list_tp) {/* Removing tail of the free list */
     free_list_tp = GET_PREV_FREE_BLKP(bp);
+    SET_NEXT_FREE_BLKP(GET_PREV_FREE_BLKP(bp), NULL);
   } else {
     SET_NEXT_FREE_BLKP(GET_PREV_FREE_BLKP(bp), GET_NEXT_FREE_BLKP(bp));
     SET_PREV_FREE_BLKP(GET_NEXT_FREE_BLKP(bp), GET_PREV_FREE_BLKP(bp));
   }
-  SET_NEXT_FREE_BLKP(bp, NULL);
-  SET_PREV_FREE_BLKP(bp, NULL);
 }
 
 /**********************************
