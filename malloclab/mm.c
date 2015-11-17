@@ -16,7 +16,7 @@
 /* If you want debugging output, use the following macro.  When you hand
  * in, remove the #define DEBUG line. */
 //#define DEBUG
-#define VIEW_HEAP
+//#define VIEW_HEAP
 #define VIEW_FREE_LIST
 #ifdef DEBUG
 # define dbg_printf(...) printf(__VA_ARGS__)
@@ -94,9 +94,6 @@ static void * find_fit(size_t asize);
 static void place(void * bp, size_t asize);
 static void insert_free_block(char * bp);
 static void delete_free_block(char * bp);
-
-static void print_block(void * bp);
-static void print_free_list(void * bp, int lineno);
 
 /*
  * Initialize: return -1 on error, 0 on success.
@@ -318,18 +315,28 @@ static void * find_fit(size_t asize) {
  */
 static void place(void * bp, size_t asize) {
   size_t bsize = GET_SIZE(HDRP(bp));    /* original block size */
-  delete_free_block(bp);
 
   if ((bsize - asize) >= 2 * DSIZE) {
+    /* Enough space for another block. Split it */
     PUT_SOFT(HDRP(bp), PACK(asize, 1));
+    delete_free_block(bp);
     void * freebp = SUCC_BLKP(bp);
     PUT(HDRP(freebp), PACK(bsize - asize, 0));
     PUT(FTRP(freebp), PACK(bsize - asize, 0));
     SET_SUCC_PREDALLOC(bp);
     insert_free_block(freebp);
   } else {
+    /* Not enough space. Mark entire block as allocated */
     PUT_SOFT(HDRP(bp), PACK(bsize, 1));
     SET_SUCC_PREDALLOC(bp);
+    /* Update pointers in free list */
+    char * prevp = GET_PREV_FREE_BLKP(bp);
+    char * nextp = GET_NEXT_FREE_BLKP(bp);
+    if (prevp != NULL)
+      SET_NEXT_FREE_BLKP(prevp, nextp);
+    if (nextp != NULL)
+      SET_PREV_FREE_BLKP(nextp, prevp);
+    delete_free_block(bp);
   }
 }
 
@@ -424,28 +431,23 @@ static void print_block(void * bp) {
     return;
   }
   if (halloc)
-    printf("Allocated block (%p): header[%5zu|%c|%c]\n", 
+    printf(" Allocated (%p): header[%5zu|%c|%c]\n", 
 	   bp, hsize, (GET_PRED_ALLOC(HDRP(bp)) ? 'a' : 'f'), (halloc ? 'a' : 'f'));
   else
-    printf("Free block      (%p): header[%5zu|%c|%c] footer[%5zu|%c] next(%p) prev(%p)\n",
+    printf("      Free (%p): header[%5zu|%c|%c] footer[%5zu|%c] next(%p) prev(%p)\n",
 	   bp, hsize, (GET_PRED_ALLOC(HDRP(bp)) ? 'a' : 'f'), (halloc ? 'a' : 'f'),
 	   fsize, (falloc ? 'a' : 'f'), GET_NEXT_FREE_BLKP(bp), GET_PREV_FREE_BLKP(bp));
 }
 
-static void print_free_list(void * p, int lineno) {
-  printf("-----Free list (line %d)-----\n", lineno);
-  while (p) {
-    printf("-------");
-    print_block(p);
-    p = GET_NEXT_FREE_BLKP(p);
-  }
-}
-
 /*
  * mm_checkheap
+ *
+ * Check all the invariants in the heap
  */
 void mm_checkheap(int lineno) {
   char * p = heap_listp;
+  /* Number of free blocks counted by walking through heap and free list */
+  int free_block_count_h = 0, free_block_count_fl = 0;
 
   /* Check epilogue block */
 #ifdef VIEW_HEAP
@@ -470,6 +472,9 @@ void mm_checkheap(int lineno) {
     /* Check block p */
     size_t size = GET_SIZE(HDRP(p));
     size_t allocd = GET_ALLOC(HDRP(p));
+    if (!allocd)
+      free_block_count_h++;
+    
     if (!aligned((void *)size) || size < 2 * DSIZE)
       printf("ERROR (line %d): wrong block size (%zu)\n", lineno, size);
     if (!aligned(p))
@@ -499,4 +504,51 @@ void mm_checkheap(int lineno) {
 #ifdef VIEW_FREE_LIST
   printf("-----Free list: head (%p) tail (%p)-----\n", free_list_hp, free_list_tp);
 #endif
+  
+  p = free_list_hp;
+  while (p) {
+    free_block_count_fl++;
+    /* Pointer within heap boundary */
+    if (!in_heap(p)) {
+      printf("ERROR (line %d): free list pointer (%p) out of bound\n", lineno, p);
+      return;
+    }
+#ifdef VIEW_FREE_LIST
+    printf("-----");
+    print_block(p);
+#endif
+    
+    /* Next/previous pointer consistency */
+    char * prevp = GET_PREV_FREE_BLKP(p);
+    char * nextp = GET_NEXT_FREE_BLKP(p);
+
+    /* Prev pointer of head should be null */
+    if (p == free_list_hp) {
+      if (prevp != NULL)
+	printf("ERROR (line %d): free list head has non-null prev pointer(%p)\n",
+	       lineno, prevp);
+    }
+    /* Prev block's next pointer should be myself */
+    else if (prevp != NULL && GET_NEXT_FREE_BLKP(prevp) != p)
+      printf("ERROR (line %d): block (%p) has prev free block with different next pointer (%p)\n",
+	     lineno, p, GET_NEXT_FREE_BLKP(prevp));
+
+    /* Next pointer of tail should be null */
+    if (p == free_list_tp && nextp != NULL) {
+      if (nextp != NULL)
+	printf("ERROR (line %d): free list tail has non-null next pointer(%p)\n",
+	       lineno, nextp);
+    }
+    /* Next block's prev pointer should be myself */
+    else if (nextp != NULL && GET_PREV_FREE_BLKP(nextp) != p)
+      printf("ERROR (line %d): block (%p) has next free block with different prev pointer (%p)\n",
+	     lineno, p, GET_PREV_FREE_BLKP(nextp));
+    
+    p = nextp;
+  }
+
+  /* Free blocks counting using two methods should match */
+  if (free_block_count_h != free_block_count_fl)
+    printf("ERROR (line %d): different free block count by heap (%d) and free list(%d)\n",
+	   lineno, free_block_count_h, free_block_count_fl);
 }
