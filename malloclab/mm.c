@@ -45,7 +45,7 @@
 
 #define WSIZE 4             /* Word (header, footer) size in bytes */
 #define DSIZE 8             /* Double word (pointer, size_t) size in bytes */
-#define CHUNKSIZE (1 << 10) /* Extend heap by at least this amount */
+#define CHUNKSIZE (1 << 8) /* Extend heap by at least this amount */
 
 /* Pack a size and allocate bit into a word */
 #define PACK(size, alloc) ((size) | (alloc))
@@ -92,8 +92,8 @@ static void * extend_heap(size_t words);
 static void * coalesce(void * bp);
 static void * find_fit(size_t asize);
 static void place(void * bp, size_t asize);
-static void insert_free_block(char * bp);
-static void delete_free_block(char * bp);
+static inline void insert_free_block(char * bp);
+static inline void delete_free_block(char * bp);
 
 /*
  * Initialize: return -1 on error, 0 on success.
@@ -429,7 +429,7 @@ static void place(void * bp, size_t asize) {
  *
  * Insert a new free block pointed to by bp to the free list.
  */
-static void insert_free_block(char * bp) {
+static inline void insert_free_block(char * bp) {
   if (free_list_hp == NULL) {
     free_list_hp = bp;
     free_list_tp = bp;
@@ -464,7 +464,7 @@ static void insert_free_block(char * bp) {
  *
  * Delete the free block pointed to by bp from the free list
  */
-static void delete_free_block(char * bp) {
+static inline void delete_free_block(char * bp) {
   if (free_list_hp == free_list_tp) {/* Only one block in the free list */
     free_list_hp = free_list_tp = NULL;
   } else if (bp == free_list_hp) {/* Removing head of the free list */
