@@ -118,7 +118,7 @@ int mm_init(void) {
    * 4 * WSIZE for prologue and epilogue header
    * NUM_BIN * WSIZE for storing array of free list head, foot and bin size
    */
-  if ((heap_listp = mem_sbrk(ALIGN(4 + 3 * NUM_BIN) * WSIZE)) == (void *)-1)
+  if ((heap_listp = mem_sbrk(ALIGN((4 + 3 * NUM_BIN) * WSIZE))) == (void *)-1)
     return -1;
 
   /* Reset data structure for seglist */
@@ -404,6 +404,7 @@ static void * coalesce(void * bp) {
  *
  * Find a block with at least asize bytes
  */
+#define BEST_FIT
 static void * find_fit(size_t asize) {
   char * bp;
   int i = find_bin(asize);
@@ -411,11 +412,37 @@ static void * find_fit(size_t asize) {
   for ( ; i < NUM_BIN; i++) {
     /* Get the free list head pointer of that bin */
     bp = offst_to_ptr(free_list_hp[i]);
+
+#ifdef BEST_FIT
+    char * candidate = NULL;
+    size_t best_size = 1 << 31;
+#endif
+
     for ( ; bp != NULL; bp = GET_NEXT_FREE_BLKP(bp)) {
-      /* Search this free list to see if there is suitable block */
-      if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp)))
+
+#ifdef BEST_FIT
+      /* In best fit strategy, scan the entire list to find a candidate */
+      size_t this_size = GET_SIZE(HDRP(bp));
+      if (asize <= this_size && this_size < best_size) {
+	best_size = this_size;
+	candidate = bp;
+	if (this_size - asize < 2 * DSIZE)
+	  /* This candidate is good enough. No need to continue searching */
+	  break;
+      }
+#else
+      /* A simple first fit strategy */
+      if (asize <= GET_SIZE(HDRP(bp)))
 	return bp;
+#endif
+
     }
+
+#ifdef BEST_FIT
+    if (candidate != NULL)
+      return candidate;
+#endif
+
   }
   return NULL;
 }
