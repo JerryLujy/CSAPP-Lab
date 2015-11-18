@@ -337,7 +337,6 @@ static void * extend_heap(size_t s) {
  * Coalesce adjacent free blocks. Return ptr to coalesced block
  */
 static void * coalesce(void * bp) {
-  void * pred;
   void * succ = SUCC_BLKP(bp);
   /* Get alloc info of successor and predecessor blocks */
   size_t pred_allocd = GET_PRED_ALLOC(HDRP(bp));
@@ -354,7 +353,7 @@ static void * coalesce(void * bp) {
       insert_free_block(bp);
     }
   } else {/* Predecessor block is free */
-    pred = PRED_BLKP(bp);
+    char * pred = PRED_BLKP(bp);
     size += GET_SIZE(HDRP(pred));
     if (succ_allocd) {/* Successor block is allocated */
       delete_free_block(pred);
@@ -429,7 +428,8 @@ static void place(void * bp, size_t asize) {
  *
  * Insert a new free block pointed to by bp to the free list.
  */
-static inline void insert_free_block(char * bp) {
+//#define ADDRESS_BASED_LIST
+static void insert_free_block(char * bp) {
   if (free_list_hp == NULL) {
     free_list_hp = bp;
     free_list_tp = bp;
@@ -438,25 +438,39 @@ static inline void insert_free_block(char * bp) {
     SET_PREV_FREE_BLKP(bp, NULL);
     return;
   }
+#ifdef ADDRESS_BASED_LIST
   if (bp < free_list_hp) {/* insert this block at the front of the free list */
+#endif
     SET_NEXT_FREE_BLKP(bp, free_list_hp);
     SET_PREV_FREE_BLKP(free_list_hp, bp);
     free_list_hp = bp;
     SET_PREV_FREE_BLKP(bp, NULL);// In case there is garbage
+#ifdef ADDRESS_BASED_LIST
   } else if (bp > free_list_tp) {/* insert this block at the end of the free list */
     SET_NEXT_FREE_BLKP(free_list_tp, bp);
     SET_PREV_FREE_BLKP(bp, free_list_tp);
     free_list_tp = bp;
     SET_NEXT_FREE_BLKP(bp, NULL);// In case there is garbage
   } else {/* insert this block somewhere in the free list */
-    char * temp = free_list_hp;
-    while (temp < bp)
+    char * temp;
+    if (((long)bp - (long)free_list_hp) < ((long)free_list_tp - (long)bp)) {
+      /* bp is closer to free list head. Start searching from head */
+      temp = free_list_hp;
+      while (temp < bp)
+	temp = GET_NEXT_FREE_BLKP(temp);
+    } else {
+      /* bp is closer to free list tail. Start searching from tail */
+      temp = free_list_tp;
+      while (temp > bp)
+	temp = GET_PREV_FREE_BLKP(temp);
       temp = GET_NEXT_FREE_BLKP(temp);
+    }
     SET_NEXT_FREE_BLKP(bp, temp);
     SET_PREV_FREE_BLKP(bp, GET_PREV_FREE_BLKP(temp));
     SET_NEXT_FREE_BLKP(GET_PREV_FREE_BLKP(temp), bp);
     SET_PREV_FREE_BLKP(temp, bp);
   }
+#endif
 }
 
 /*
@@ -464,7 +478,7 @@ static inline void insert_free_block(char * bp) {
  *
  * Delete the free block pointed to by bp from the free list
  */
-static inline void delete_free_block(char * bp) {
+static void delete_free_block(char * bp) {
   if (free_list_hp == free_list_tp) {/* Only one block in the free list */
     free_list_hp = free_list_tp = NULL;
   } else if (bp == free_list_hp) {/* Removing head of the free list */
