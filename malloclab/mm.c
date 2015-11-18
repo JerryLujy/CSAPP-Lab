@@ -16,7 +16,7 @@
 /* If you want debugging output, use the following macro.  When you hand
  * in, remove the #define DEBUG line. */
 //#define DEBUG
-//#define VIEW_HEAP
+#define VIEW_HEAP
 #define VIEW_FREE_LIST
 #ifdef DEBUG
 # define dbg_printf(...) printf(__VA_ARGS__)
@@ -45,7 +45,8 @@
 
 #define WSIZE 4             /* Word (header, footer) size in bytes */
 #define DSIZE 8             /* Double word (pointer, size_t) size in bytes */
-#define CHUNKSIZE (1 << 8) /* Extend heap by at least this amount */
+#define CHUNKSIZE (1 << 8)  /* Extend heap by at least this amount */
+#define NUM_BIN 12          /* Number of bins in the free list */
 
 /* Pack a size and allocate bit into a word */
 #define PACK(size, alloc) ((size) | (alloc))
@@ -83,15 +84,22 @@
 #define GET_PREV_FREE_BLKP(bp) offst_to_ptr(GET(bp + WSIZE))
 
 /* Global variables */
-static char * heap_listp = NULL;     /* Pointer to first block */
-static char * free_list_hp = NULL;   /* Pointer to head of free list */
-static char * free_list_tp = NULL;   /* Pointer to tail of free list */
+
+/* Pointer to first block in heap */
+static char * heap_listp = NULL;
+/* Array of free list head pointers. Pointers are stored as offset w.r.t. heap_listp */
+static unsigned int * free_list_hp = NULL;
+/* Array of free list tail pointers. */
+static unsigned int * free_list_tp = NULL;
+/* Array of segregated list bin sizes */
+static unsigned int * bin_size = NULL;
 
 /* Helper functions */
 static void * extend_heap(size_t words);
 static void * coalesce(void * bp);
 static void * find_fit(size_t asize);
 static void place(void * bp, size_t asize);
+static inline int find_bin(size_t size);
 static inline void insert_free_block(char * bp);
 static inline void delete_free_block(char * bp);
 
@@ -104,10 +112,25 @@ int mm_init(void) {
   heap_listp = NULL;
   free_list_hp = NULL;
   free_list_tp = NULL;
+  bin_size = NULL;
   
-  /* Create an empty heap */
-  if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1)
+  /* Create an empty heap
+   * 4 * WSIZE for prologue and epilogue header
+   * NUM_BIN * WSIZE for storing array of free list head, foot and bin size
+   */
+  if ((heap_listp = mem_sbrk(ALIGN(4 + 3 * NUM_BIN) * WSIZE)) == (void *)-1)
     return -1;
+
+  /* Reset data structure for seglist */
+  free_list_hp = (unsigned int *)heap_listp;
+  free_list_tp = (unsigned int *)(heap_listp + NUM_BIN * WSIZE);
+  bin_size = (unsigned int *)(heap_listp + 2 * NUM_BIN * WSIZE);
+  memset(heap_listp, 0, 3 * NUM_BIN * WSIZE);
+  /* Set up size for each free list bin */
+  for (int i = 0; i < NUM_BIN; i++)
+    bin_size[i] = 1 << (i + 4);
+
+  heap_listp = (char *)ALIGN(heap_listp + 3 * NUM_BIN * WSIZE);
 
   PUT(heap_listp, 0);                           /* Alignment padding */
   PUT(heap_listp +     WSIZE, PACK(DSIZE, 1));  /* Prologue header */
@@ -192,7 +215,7 @@ void free (void * bp) {
   insert_free_block(bp);
 
   coalesce(bp);
-
+  dbg_printf("After coalescing\n");
   checkheap(__LINE__);
 }
 
@@ -382,12 +405,31 @@ static void * coalesce(void * bp) {
  * Find a block with at least asize bytes
  */
 static void * find_fit(size_t asize) {
-  void * bp;
-  for (bp = free_list_hp; bp != NULL; bp = GET_NEXT_FREE_BLKP(bp)) {
-    if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp)))
-      return bp;
+  char * bp;
+  int i = find_bin(asize);
+
+  for ( ; i < NUM_BIN; i++) {
+    /* Get the free list head pointer of that bin */
+    bp = offst_to_ptr(free_list_hp[i]);
+    for ( ; bp != NULL; bp = GET_NEXT_FREE_BLKP(bp)) {
+      /* Search this free list to see if there is suitable block */
+      if (!GET_ALLOC(HDRP(bp)) && asize <= GET_SIZE(HDRP(bp)))
+	return bp;
+    }
   }
   return NULL;
+}
+
+/* 
+ * find_bin
+ *
+ * Given the size of the block, find out which free list it should belong to
+ */
+static inline int find_bin(size_t size) {
+  int i = 0;
+  for ( ; size > bin_size[i] && i < NUM_BIN-1; i++)
+    ;
+  return i;
 }
 
 /*
@@ -401,8 +443,8 @@ static void place(void * bp, size_t asize) {
 
   if ((bsize - asize) >= 2 * DSIZE) {
     /* Enough space for another block. Split it */
-    PUT_SOFT(HDRP(bp), PACK(asize, 1));
     delete_free_block(bp);
+    PUT_SOFT(HDRP(bp), PACK(asize, 1));
     void * freebp = SUCC_BLKP(bp);
     PUT(HDRP(freebp), PACK(bsize - asize, 0));
     PUT(FTRP(freebp), PACK(bsize - asize, 0));
@@ -410,6 +452,7 @@ static void place(void * bp, size_t asize) {
     insert_free_block(freebp);
   } else {
     /* Not enough space. Mark entire block as allocated */
+    delete_free_block(bp);
     PUT_SOFT(HDRP(bp), PACK(bsize, 1));
     SET_SUCC_PREDALLOC(bp);
     /* Update pointers in free list */
@@ -419,7 +462,6 @@ static void place(void * bp, size_t asize) {
       SET_NEXT_FREE_BLKP(prevp, nextp);
     if (nextp != NULL)
       SET_PREV_FREE_BLKP(nextp, prevp);
-    delete_free_block(bp);
   }
 }
 
@@ -428,39 +470,50 @@ static void place(void * bp, size_t asize) {
  *
  * Insert a new free block pointed to by bp to the free list.
  */
-//#define ADDRESS_BASED_LIST
+#define ADDRESS_BASED_LIST
 static void insert_free_block(char * bp) {
-  if (free_list_hp == NULL) {
-    free_list_hp = bp;
-    free_list_tp = bp;
+  int i = find_bin(GET_SIZE(HDRP(bp)));
+  char * hp = offst_to_ptr(free_list_hp[i]);
+
+#ifdef ADDRESS_BASED_LIST
+  char * tp = offst_to_ptr(free_list_tp[i]);
+#endif
+
+  if (hp == NULL) {
+    free_list_hp[i] = ptr_to_offst(bp);
+    free_list_tp[i] = ptr_to_offst(bp);
     /* In case there is garbage stored in block */
     SET_NEXT_FREE_BLKP(bp, NULL);
     SET_PREV_FREE_BLKP(bp, NULL);
     return;
   }
+
 #ifdef ADDRESS_BASED_LIST
-  if (bp < free_list_hp) {/* insert this block at the front of the free list */
+  if (bp < hp) {/* insert this block at the front of the free list */
 #endif
-    SET_NEXT_FREE_BLKP(bp, free_list_hp);
-    SET_PREV_FREE_BLKP(free_list_hp, bp);
-    free_list_hp = bp;
+
+    SET_NEXT_FREE_BLKP(bp, hp);
+    SET_PREV_FREE_BLKP(hp, bp);
+    free_list_hp[i] = ptr_to_offst(bp);
     SET_PREV_FREE_BLKP(bp, NULL);// In case there is garbage
+
 #ifdef ADDRESS_BASED_LIST
-  } else if (bp > free_list_tp) {/* insert this block at the end of the free list */
-    SET_NEXT_FREE_BLKP(free_list_tp, bp);
-    SET_PREV_FREE_BLKP(bp, free_list_tp);
-    free_list_tp = bp;
+
+  } else if (bp > tp) {/* insert this block at the end of the free list */
+    SET_NEXT_FREE_BLKP(tp, bp);
+    SET_PREV_FREE_BLKP(bp, tp);
+    free_list_tp[i] = ptr_to_offst(bp);
     SET_NEXT_FREE_BLKP(bp, NULL);// In case there is garbage
   } else {/* insert this block somewhere in the free list */
     char * temp;
-    if (((long)bp - (long)free_list_hp) < ((long)free_list_tp - (long)bp)) {
+    if (((long)bp - (long)hp) < ((long)tp - (long)bp)) {
       /* bp is closer to free list head. Start searching from head */
-      temp = free_list_hp;
+      temp = hp;
       while (temp < bp)
 	temp = GET_NEXT_FREE_BLKP(temp);
     } else {
       /* bp is closer to free list tail. Start searching from tail */
-      temp = free_list_tp;
+      temp = tp;
       while (temp > bp)
 	temp = GET_PREV_FREE_BLKP(temp);
       temp = GET_NEXT_FREE_BLKP(temp);
@@ -470,6 +523,7 @@ static void insert_free_block(char * bp) {
     SET_NEXT_FREE_BLKP(GET_PREV_FREE_BLKP(temp), bp);
     SET_PREV_FREE_BLKP(temp, bp);
   }
+
 #endif
 }
 
@@ -479,13 +533,16 @@ static void insert_free_block(char * bp) {
  * Delete the free block pointed to by bp from the free list
  */
 static void delete_free_block(char * bp) {
-  if (free_list_hp == free_list_tp) {/* Only one block in the free list */
-    free_list_hp = free_list_tp = NULL;
-  } else if (bp == free_list_hp) {/* Removing head of the free list */
-    free_list_hp = GET_NEXT_FREE_BLKP(bp);
+  int i = find_bin(GET_SIZE(HDRP(bp)));
+  char * hp = offst_to_ptr(free_list_hp[i]);
+  char * tp = offst_to_ptr(free_list_tp[i]);
+  if (hp == tp) {/* Only one block in the free list */
+    free_list_hp[i] = free_list_tp[i] = 0;
+  } else if (bp == hp) {/* Removing head of the free list */
+    free_list_hp[i] = ptr_to_offst(GET_NEXT_FREE_BLKP(bp));
     SET_PREV_FREE_BLKP(GET_NEXT_FREE_BLKP(bp), NULL);
-  } else if (bp == free_list_tp) {/* Removing tail of the free list */
-    free_list_tp = GET_PREV_FREE_BLKP(bp);
+  } else if (bp == tp) {/* Removing tail of the free list */
+    free_list_tp[i] = ptr_to_offst(GET_PREV_FREE_BLKP(bp));
     SET_NEXT_FREE_BLKP(GET_PREV_FREE_BLKP(bp), NULL);
   } else {
     SET_NEXT_FREE_BLKP(GET_PREV_FREE_BLKP(bp), GET_NEXT_FREE_BLKP(bp));
@@ -498,16 +555,18 @@ static void delete_free_block(char * bp) {
  **********************************/
 
 /*
+ * in_heap
+ *
  * Return whether the pointer is in the heap.
- * May be useful for debugging.
  */
 static int in_heap(const void *p) {
   return p <= mem_heap_hi() && p >= mem_heap_lo();
 }
 
 /*
+ * aligned
+ *
  * Return whether the pointer is aligned.
- * May be useful for debugging.
  */
 static int aligned(const void * p) {
   return (size_t)ALIGN(p) == (size_t)p;
@@ -516,7 +575,7 @@ static int aligned(const void * p) {
 /*
  * print_block
  *
- * Print the info of the block
+ * Print the details of a block
  */
 static void print_block(void * bp) {
   size_t hsize, halloc, fsize, falloc;
@@ -598,51 +657,70 @@ void mm_checkheap(int lineno) {
   if (GET_SIZE(HDRP(p)) != 0 || !GET_ALLOC(HDRP(p)))
     printf("ERROR (line %d): bad prologue (%d)\n", lineno, GET(HDRP(p)));
 
-  /* Check free list */
-#ifdef VIEW_FREE_LIST
-  printf("-----Free list: head (%p) tail (%p)-----\n", free_list_hp, free_list_tp);
-#endif
-  
-  p = free_list_hp;
-  while (p) {
-    free_block_count_fl++;
-    /* Pointer within heap boundary */
-    if (!in_heap(p)) {
-      printf("ERROR (line %d): free list pointer (%p) out of bound\n", lineno, p);
-      return;
+  /* Check free lists */
+
+  for (int i = 0; i < NUM_BIN; i++) {/* Iterate through all free lists */
+
+    char * hp = offst_to_ptr(free_list_hp[i]);
+    char * tp = offst_to_ptr(free_list_tp[i]);
+    if (hp == NULL) {
+      if (tp != NULL)
+	printf("ERROR (line %d): empty free list #%d has none NULL tail\n", lineno, i+1);
+      else
+	continue;
     }
+
 #ifdef VIEW_FREE_LIST
-    printf("-----");
-    print_block(p);
+    printf("-----Free list (#%d): head (%p) tail (%p)-----\n", i + 1, hp, tp);
 #endif
     
-    /* Next/previous pointer consistency */
-    char * prevp = GET_PREV_FREE_BLKP(p);
-    char * nextp = GET_NEXT_FREE_BLKP(p);
-
-    /* Prev pointer of head should be null */
-    if (p == free_list_hp) {
-      if (prevp != NULL)
-	printf("ERROR (line %d): free list head has non-null prev pointer(%p)\n",
-	       lineno, prevp);
+    p = hp;
+    while (p) {
+      free_block_count_fl++;
+      /* Pointer within heap boundary */
+      if (!in_heap(p)) {
+	printf("ERROR (line %d): free list pointer (%p) out of bound\n", lineno, p);
+	return;
+      }
+#ifdef VIEW_FREE_LIST
+      printf("-----");
+      print_block(p);
+#endif
+      
+      /* Next/previous pointer consistency */
+      char * prevp = GET_PREV_FREE_BLKP(p);
+      char * nextp = GET_NEXT_FREE_BLKP(p);
+      
+      /* Prev pointer of head should be null */
+      if (p == hp) {
+	if (prevp != NULL)
+	  printf("ERROR (line %d): free list head has non-null prev pointer(%p)\n",
+		 lineno, prevp);
+      }
+      /* Prev block's next pointer should be myself */
+      else if (prevp != NULL && GET_NEXT_FREE_BLKP(prevp) != p)
+	printf("ERROR (line %d): block (%p) has prev free block with different next pointer (%p)\n",
+	       lineno, p, GET_NEXT_FREE_BLKP(prevp));
+      
+      /* Next pointer of tail should be null */
+      if (p == tp) {
+	if (nextp != NULL)
+	  printf("ERROR (line %d): free list tail has non-null next pointer(%p)\n",
+		 lineno, nextp);
+      }
+      /* Next block's prev pointer should be myself */
+      else if (nextp != NULL && GET_PREV_FREE_BLKP(nextp) != p)
+	printf("ERROR (line %d): block (%p) has next free block with different prev pointer (%p)\n",
+	       lineno, p, GET_PREV_FREE_BLKP(nextp));
+      /* Size of this block within bin size range */
+      size_t size = GET_SIZE(HDRP(p));
+      int bin = find_bin(size);
+      if (bin != i) {
+	printf("ERROR (line %d): block with size %zu not in correct bin (should be %d, now %d)\n",
+	       lineno, size, bin+1, i+1);
+      }
+      p = nextp;
     }
-    /* Prev block's next pointer should be myself */
-    else if (prevp != NULL && GET_NEXT_FREE_BLKP(prevp) != p)
-      printf("ERROR (line %d): block (%p) has prev free block with different next pointer (%p)\n",
-	     lineno, p, GET_NEXT_FREE_BLKP(prevp));
-
-    /* Next pointer of tail should be null */
-    if (p == free_list_tp && nextp != NULL) {
-      if (nextp != NULL)
-	printf("ERROR (line %d): free list tail has non-null next pointer(%p)\n",
-	       lineno, nextp);
-    }
-    /* Next block's prev pointer should be myself */
-    else if (nextp != NULL && GET_PREV_FREE_BLKP(nextp) != p)
-      printf("ERROR (line %d): block (%p) has next free block with different prev pointer (%p)\n",
-	     lineno, p, GET_PREV_FREE_BLKP(nextp));
-    
-    p = nextp;
   }
 
   /* Free blocks counting using two methods should match */
