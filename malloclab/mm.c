@@ -1,8 +1,55 @@
 /*
  * mm.c
  *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * Brief intro:
+ *   This allocator library uses segregated explicit free list as the heap
+ *   maintenance data structure. A small area at the beginning of the heap has
+ *   been set up to store the info (header pointer, tail pointer and size) of 
+ *   the segregated free lists. The footer of an allocated block is ommitted
+ *   to improve heap utilization, and the second least significant bit of the 
+ *   header <predalloc> stores if the predecessor block has been allocated.
+ *   Below is a simple diagram of the heap and blocks.
+ *
+ *         Heap:                              Allocated block:
+ *   ------------------
+ *  [ free list 1 head ] (4 bytes)     [header:<size>|<predalloc>|<1>]__(align)
+ *     ..............                  [...........payload...........]
+ *  [ free list n head ]               [...........payload...........]
+ *   ------------------                  ...........................
+ *  [ free list 1 tail ] (4 bytes)     [...........payload...........]
+ *     ..............
+ *  [ free list n tail ]
+ *   ------------------                          Free block:
+ *  [ free list 1 size ] (4 bytes)   
+ *     ..............                  [header:<size>|<predalloc>|<0>]__(align)
+ *  [ free list n size ]               [   next free block pointer   ](4 bytes)
+ *  [    (padding)     ]               [   prev free block pointer   ](4 bytes)
+ *   ------------------                  ...........................
+ *  [  prologue block  ]--heap_listp     ...........................
+ *  [     BLOCK  1     ]                 ...........................
+ *  [     BLOCK  2     ]                 ...........................
+ *     ..............                  [footer:<size>|           |<0>]
+ *  [     BLOCK  n     ]
+ *  [  epilogue block  ]
+ *
+ * Seglists:
+ *   The macro NUM_BIN sets how many seglists we have, and the size of each 
+ *   bins are set up as (0 16],(16 32],(32 64],(64 128],....,(2^(n+4) inf)
+ *   This allocator used 12 total seglists
+ *  
+ * Free block insertion and searching:
+ *   Free block are inserted into the free lists using LIFO strategy
+ *   Searching free blocks during allocation is done using best-fit approach
+ *
+ * Optimization strategy:
+ *   1. Given the size of the heap is no bigger than 2^32 bytes, the block size
+ *      can be stored as 4 byte integers. Moreover, the pointers to the free
+ *      blocks can be encoded as 4-byte offsets w.r.t the start of the heap.
+ *      Therefore the minimum size of a block can be reduced to 16 bytes.
+ *   2. No footer for allocated blocks. Instead the allocation info of the
+ *      predecessor block is stored in the second bit of the header.
+ *
+ * Author: Jieyu Lu       Andrew ID: jieyul1
  */
 #include <assert.h>
 #include <stdio.h>
@@ -13,8 +60,11 @@
 #include "mm.h"
 #include "memlib.h"
 
-/* If you want debugging output, use the following macro.  When you hand
- * in, remove the #define DEBUG line. */
+/* 
+ * Switches for checking heap and printing output for debugging.
+ * DEBUG is the overall switch. 
+ * VIEW_HEAP / VIEW_FREE_LIST print details of the heap and free lists.
+ */
 //#define DEBUG
 #define VIEW_HEAP
 #define VIEW_FREE_LIST
@@ -35,18 +85,21 @@
 #define calloc mm_calloc
 #endif /* def DRIVER */
 
-/* single word (4) or double word (8) alignment */
-#define ALIGNMENT 8
+/* Allocator characteristics */
+#define ALIGNMENT 8         /* single word (4) or double word (8) alignment */
+#define WSIZE 4             /* word (header, footer) size in bytes */
+#define DSIZE 8             /* double word (pointer, size_t) size in bytes */
+#define CHUNKSIZE (1 << 8)  /* extend heap by at least this amount */
+#define NUM_BIN 12          /* number of bins in the segregated free list */
+/* Free block insertion strategy (uncomment for LIFO)*/
+//#define ADDRESS_BASED_LIST
+/* Find free block strategy (uncomment for first fit) */
+#define BEST_FIT
 
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
-
-#define WSIZE 4             /* Word (header, footer) size in bytes */
-#define DSIZE 8             /* Double word (pointer, size_t) size in bytes */
-#define CHUNKSIZE (1 << 8)  /* Extend heap by at least this amount */
-#define NUM_BIN 12          /* Number of bins in the free list */
 
 /* Pack a size and allocate bit into a word */
 #define PACK(size, alloc) ((size) | (alloc))
@@ -75,7 +128,7 @@
 #define SET_SUCC_PREDALLOC(bp) (GET(HDRP(SUCC_BLKP(bp))) |= 0x2)
 #define RESET_SUCC_PREDALLOC(bp) (GET(HDRP(SUCC_BLKP(bp))) &= ~0x2)
 
-/* Given (free) block ptr bp, encode prev and next free list block address here */
+/* Given (free) block ptr bp, encode prev and next free list block address */
 #define SET_NEXT_FREE_BLKP(bp, ptr) PUT(bp, ptr_to_offst(ptr))
 #define SET_PREV_FREE_BLKP(bp, ptr) PUT((bp + WSIZE), ptr_to_offst(ptr))
 
@@ -87,7 +140,8 @@
 
 /* Pointer to first block in heap */
 static char * heap_listp = NULL;
-/* Array of free list head pointers. Pointers are stored as offset w.r.t. heap_listp */
+/* Array of free list head pointers
+ * Pointers are stored as offset w.r.t. heap_listp */
 static unsigned int * free_list_hp = NULL;
 /* Array of free list tail pointers. */
 static unsigned int * free_list_tp = NULL;
@@ -97,14 +151,16 @@ static unsigned int * bin_size = NULL;
 /* Helper functions */
 static void * extend_heap(size_t words);
 static void * coalesce(void * bp);
-static void * find_fit(size_t asize);
 static void place(void * bp, size_t asize);
+static inline void * find_fit(size_t asize);
 static inline int find_bin(size_t size);
 static inline void insert_free_block(char * bp);
 static inline void delete_free_block(char * bp);
 
 /*
- * Initialize: return -1 on error, 0 on success.
+ * mm_init
+ *
+ * Initializes the heap area. Return -1 on error, 0 on success.
  */
 int mm_init(void) { 
   dbg_printf("\n***** Init Request *****\n");
@@ -153,6 +209,8 @@ int mm_init(void) {
 
 /*
  * malloc
+ *
+ * Allocate a heap area with input size. Return non-null pointer on success.
  */
 void * malloc (size_t size) {
   size_t asize;       /* Adjusted block size */
@@ -174,7 +232,8 @@ void * malloc (size_t size) {
     /* Overhead for allocated block is WSIZE */
     asize = ALIGN(size + WSIZE);
 
-  dbg_printf("\n***** Malloc Request (size = %zu, round to %zu) *****\n", size, asize);
+  dbg_printf("\n***** Malloc Request (size = %zu, round to %zu) *****\n",
+	     size, asize);
   /* Search the free list for a fit */
   if ((bp = find_fit(asize)) != NULL) {
     dbg_printf("Found fit at (%p)\n", bp);
@@ -200,6 +259,9 @@ void * malloc (size_t size) {
 
 /*
  * free
+ *
+ * Frees up the heap storage pointed to by bp. Only valid when bp was returned
+ * by previous allocator functions.
  */
 void free (void * bp) {
   if(!bp)
@@ -211,11 +273,11 @@ void free (void * bp) {
 
   PUT_SOFT(HDRP(bp), PACK(size, 0));
   PUT(FTRP(bp), PACK(size, 0));
-  RESET_SUCC_PREDALLOC(bp);    /* set the successor block's predalloc info to be 0 */
+  RESET_SUCC_PREDALLOC(bp);/* set the successor block predalloc info to be 0 */
   insert_free_block(bp);
 
   coalesce(bp);
-  dbg_printf("After coalescing\n");
+
   checkheap(__LINE__);
 }
 
@@ -223,11 +285,17 @@ void free (void * bp) {
  * realloc
  *
  * Change the size of an allocated block pointed to by ptr to size
+ * 1. If size is smaller than the original size, no need to allocate new
+ *    memory, simply change header and return the original pointer
+ * 2. If size is bigger than original size, but there is a successor free block
+ *    large enough to hold the extra size, no need to allocate new memory.
+ * 3. Otherwise, same as freeing + mallocing + copying data to new place.
  */
 void * realloc(void * ptr, size_t size) {
   /* Null ptr equivalent to malloc(size) */
   if (ptr == NULL) {
-    dbg_printf("\n***** Realloc Request (NULL, %zu) Do malloc instead *****\n", size);
+    dbg_printf("\n***** Realloc Request (NULL, %zu) Do malloc instead *****\n",
+	       size);
     return malloc(size);
   }
   /* Zero size equivalent to free(ptr) */
@@ -310,7 +378,7 @@ void * realloc(void * ptr, size_t size) {
  * calloc
  *
  * Allocates memory for an array of nmemb elements, each of size bytes
- * Memory is set to zero
+ * The allocated memory is initialized to zero
  */
 void * calloc (size_t nmemb, size_t size) {
   size_t total = nmemb * size;
@@ -402,10 +470,11 @@ static void * coalesce(void * bp) {
 /*
  * find_fit
  *
- * Find a block with at least asize bytes
+ * Find a block with at least asize bytes. The macro at the beginning of the
+ * file defines the strategy of finding fit . The choices are between 
+ * first fit and best fit.
  */
-#define BEST_FIT
-static void * find_fit(size_t asize) {
+static inline void * find_fit(size_t asize) {
   char * bp;
   int i = find_bin(asize);
 
@@ -454,7 +523,7 @@ static void * find_fit(size_t asize) {
  */
 static inline int find_bin(size_t size) {
   int i = 0;
-  for ( ; size > bin_size[i] && i < NUM_BIN-1; i++)
+  for ( ; size > bin_size[i] && i < NUM_BIN - 1; i++)
     ;
   return i;
 }
@@ -495,10 +564,11 @@ static void place(void * bp, size_t asize) {
 /* 
  * insert_free_block
  *
- * Insert a new free block pointed to by bp to the free list.
+ * Insert a new free block pointed to by bp to the free list. The macro at the
+ * beginning of the file defines the insertion strategy. The choices are
+ * between LIFO and address-based.
  */
-#define ADDRESS_BASED_LIST
-static void insert_free_block(char * bp) {
+static inline void insert_free_block(char * bp) {
   int i = find_bin(GET_SIZE(HDRP(bp)));
   char * hp = offst_to_ptr(free_list_hp[i]);
 
@@ -559,7 +629,7 @@ static void insert_free_block(char * bp) {
  *
  * Delete the free block pointed to by bp from the free list
  */
-static void delete_free_block(char * bp) {
+static inline void delete_free_block(char * bp) {
   int i = find_bin(GET_SIZE(HDRP(bp)));
   char * hp = offst_to_ptr(free_list_hp[i]);
   char * tp = offst_to_ptr(free_list_tp[i]);
@@ -616,24 +686,32 @@ static void print_block(void * bp) {
   }
   if (halloc)
     printf(" Allocated (%p): header[%5zu|%c|%c]\n", 
-	   bp, hsize, (GET_PRED_ALLOC(HDRP(bp)) ? 'a' : 'f'), (halloc ? 'a' : 'f'));
+	   bp, hsize, (GET_PRED_ALLOC(HDRP(bp)) ? 'a' : 'f'),
+	   (halloc ? 'a' : 'f'));
   else
-    printf("      Free (%p): header[%5zu|%c|%c] footer[%5zu|%c] next(%p) prev(%p)\n",
-	   bp, hsize, (GET_PRED_ALLOC(HDRP(bp)) ? 'a' : 'f'), (halloc ? 'a' : 'f'),
-	   fsize, (falloc ? 'a' : 'f'), GET_NEXT_FREE_BLKP(bp), GET_PREV_FREE_BLKP(bp));
+    printf("      Free (%p): header[%5zu|%c|%c] footer[%5zu|%c] "
+	   "next(%p) prev(%p)\n",
+	   bp, hsize, (GET_PRED_ALLOC(HDRP(bp)) ? 'a' : 'f'),
+	   (halloc ? 'a' : 'f'), fsize, (falloc ? 'a' : 'f'),
+	   GET_NEXT_FREE_BLKP(bp), GET_PREV_FREE_BLKP(bp));
 }
 
 /*
  * mm_checkheap
  *
- * Check all the invariants in the heap
+ * Check all the invariants in the heap, including:
+ * 1. Prologue and epilogue block
+ * 2. Block alignment, header and footer, size, alloc/predalloc bit consistency
+ * 3. No consecutive free blocks
+ * 4. Free list pointer consistency, pointer boundary, size with seglist range
+ * 5. Number of free blocks counted by free lists and heap are the same
  */
 void mm_checkheap(int lineno) {
   char * p = heap_listp;
   /* Number of free blocks counted by walking through heap and free list */
   int free_block_count_h = 0, free_block_count_fl = 0;
 
-  /* Check epilogue block */
+  /* Check prologue block */
 #ifdef VIEW_HEAP
     printf("==heap==");
     print_block(p);
@@ -665,12 +743,12 @@ void mm_checkheap(int lineno) {
       printf("ERROR (line %d): %p is not double word aligned\n", lineno, p);
     /* Header and footer matching if free block */
     if (!allocd && ((GET(HDRP(p)) & ~0x2) != (GET(FTRP(p)) & ~0x2)) )
-      printf("ERROR (line %d): header (%u) does not match footer (%u)\n", lineno,
-	     GET(HDRP(p)), GET(FTRP(p)));
+      printf("ERROR (line %d): header (%u) does not match footer (%u)\n",
+	     lineno, GET(HDRP(p)), GET(FTRP(p)));
     /* Alloc bit and next block predalloc bit consistency */
     if (allocd != GET_PRED_ALLOC(HDRP(SUCC_BLKP(p))) >> 1)
-      printf("ERROR (line %d): alloc bit does not match successor predalloc bit\n", 
-	     lineno);
+      printf("ERROR (line %d): alloc bit does not match "
+	     "successor predalloc bit\n", lineno);
     /* No consecutive free blocks in the heap */
     if (!allocd && !GET_ALLOC(HDRP(SUCC_BLKP(p))))
       printf("ERROR (line %d): consecutive free blocks afterwards\n", lineno);
@@ -692,7 +770,8 @@ void mm_checkheap(int lineno) {
     char * tp = offst_to_ptr(free_list_tp[i]);
     if (hp == NULL) {
       if (tp != NULL)
-	printf("ERROR (line %d): empty free list #%d has none NULL tail\n", lineno, i+1);
+	printf("ERROR (line %d): empty free list #%d has none NULL tail\n",
+	       lineno, i+1);
       else
 	continue;
     }
@@ -706,7 +785,8 @@ void mm_checkheap(int lineno) {
       free_block_count_fl++;
       /* Pointer within heap boundary */
       if (!in_heap(p)) {
-	printf("ERROR (line %d): free list pointer (%p) out of bound\n", lineno, p);
+	printf("ERROR (line %d): free list pointer (%p) out of bound\n",
+	       lineno, p);
 	return;
       }
 #ifdef VIEW_FREE_LIST
@@ -721,30 +801,30 @@ void mm_checkheap(int lineno) {
       /* Prev pointer of head should be null */
       if (p == hp) {
 	if (prevp != NULL)
-	  printf("ERROR (line %d): free list head has non-null prev pointer(%p)\n",
-		 lineno, prevp);
+	  printf("ERROR (line %d): free list head has non-null prev "
+		 "pointer(%p)\n", lineno, prevp);
       }
       /* Prev block's next pointer should be myself */
       else if (prevp != NULL && GET_NEXT_FREE_BLKP(prevp) != p)
-	printf("ERROR (line %d): block (%p) has prev free block with different next pointer (%p)\n",
-	       lineno, p, GET_NEXT_FREE_BLKP(prevp));
+	printf("ERROR (line %d): block (%p) has prev free block with different"
+	       " next pointer (%p)\n", lineno, p, GET_NEXT_FREE_BLKP(prevp));
       
       /* Next pointer of tail should be null */
       if (p == tp) {
 	if (nextp != NULL)
-	  printf("ERROR (line %d): free list tail has non-null next pointer(%p)\n",
-		 lineno, nextp);
+	  printf("ERROR (line %d): free list tail has non-null next "
+		 "pointer(%p)\n", lineno, nextp);
       }
       /* Next block's prev pointer should be myself */
       else if (nextp != NULL && GET_PREV_FREE_BLKP(nextp) != p)
-	printf("ERROR (line %d): block (%p) has next free block with different prev pointer (%p)\n",
-	       lineno, p, GET_PREV_FREE_BLKP(nextp));
+	printf("ERROR (line %d): block (%p) has next free block with different"
+	       " prev pointer (%p)\n", lineno, p, GET_PREV_FREE_BLKP(nextp));
       /* Size of this block within bin size range */
       size_t size = GET_SIZE(HDRP(p));
       int bin = find_bin(size);
       if (bin != i) {
-	printf("ERROR (line %d): block with size %zu not in correct bin (should be %d, now %d)\n",
-	       lineno, size, bin+1, i+1);
+	printf("ERROR (line %d): block with size %zu not in correct bin "
+	       "(should be %d, now %d)\n", lineno, size, bin+1, i+1);
       }
       p = nextp;
     }
@@ -752,6 +832,6 @@ void mm_checkheap(int lineno) {
 
   /* Free blocks counting using two methods should match */
   if (free_block_count_h != free_block_count_fl)
-    printf("ERROR (line %d): different free block count by heap (%d) and free list(%d)\n",
-	   lineno, free_block_count_h, free_block_count_fl);
+    printf("ERROR (line %d): different free block count by heap (%d) and "
+	   "free list(%d)\n", lineno, free_block_count_h, free_block_count_fl);
 }
