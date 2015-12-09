@@ -17,8 +17,10 @@ static const char * user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64
 
 void serve(int fd);
 int get_request(rio_t * rio, char * method, char * uri, char * version);
-void parse_uri(char * uri, char * hostname, char * query);
-void build_request(rio_t * rio, char * request, char * hostname, char * query);
+void parse_uri(char * uri, char * hostname, char * port, char * query);
+void build_request(rio_t * rio, char * request, char * hostname,
+		   char * port, char * query);
+int send_request(char * hostname, char * port, char * request, int clientfd);
 void proxyerror(int fd, char * cause, int code,
 		char * shortmsg, char * longmsg);
 
@@ -49,19 +51,42 @@ int main(int argc, char * * argv)
 
 void serve(int fd)
 {
+  char buf[MAXBUF];
   char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-  char hostname[MAXLINE], query[MAXLINE];
+  char hostname[MAXLINE], port[MAXLINE], query[MAXLINE];
   char request[MAXBUF];
   rio_t rio;
+  int serverfd;
 
   Rio_readinitb(&rio, fd);
   /* Read client request line */
   if (!get_request(&rio, method, uri, version))
     return;
   /* Get hostname and query string from uri */
-  parse_uri(uri, hostname, query);
+  parse_uri(uri, hostname, port, query);
   /* Build the request to be send out to server */
-  build_request(&rio, request, hostname, query);
+  build_request(&rio, request, hostname, port, query);
+  /* Send request to server */
+  if ((serverfd = send_request(hostname, port, request, fd)) < 0)
+    return;
+  /* Read reponse from server and forward to client */
+  Rio_readinitb(&rio, serverfd);
+  int contentlen = 0;
+  do {
+    Rio_readlineb(&rio, buf, MAXBUF);
+    Rio_writen(fd, buf, strlen(buf));
+    if (strncasecmp(buf, "Content-Length", 14) == 0) {
+      contentlen = atoi(buf + 15);
+    }      
+  } while (strcmp(buf, "\r\n") != 0);
+  while (contentlen > 0) {
+    size_t n = (contentlen > MAXBUF) ? MAXBUF : contentlen;
+    ssize_t s = Rio_readnb(&rio, buf, n);
+    if (s <= 0) break;
+    contentlen -= s;
+    Rio_writen(fd, buf, n);
+  }
+  Close(serverfd);
 }
 
 int get_request(rio_t * rio, char * method, char * uri, char * version)
@@ -75,7 +100,7 @@ int get_request(rio_t * rio, char * method, char * uri, char * version)
   if (sscanf(buf, "%s %s %s", method, uri, version) != 3 ||
       strstr(version, "HTTP/1.") == NULL) {
     proxyerror(rio->rio_fd, buf, 400, "Bad request",
-	       "The proxy cannot understand the request");
+	       "Proxy cannot understand the request");
     return 0;
   }
   if (strcasecmp(method, "GET") != 0) {
@@ -86,11 +111,15 @@ int get_request(rio_t * rio, char * method, char * uri, char * version)
   return 1;
 }
 
-void build_request(rio_t * rio, char * request, char * hostname, char * query)
+void build_request(rio_t * rio, char * request, char * hostname,
+		   char * port, char * query)
 {
   char buf[MAXLINE];
   sprintf(request, "GET %s HTTP/1.0\r\n", query);
-  sprintf(request, "%sHost: %s\r\n", request, hostname);
+  if (strlen(port) == 0)
+    sprintf(request, "%sHost: %s\r\n", request, hostname);
+  else
+    sprintf(request, "%sHost: %s:%s\r\n", request, hostname, port);
   sprintf(request, "%s%s\r\n", request, user_agent_hdr);
   sprintf(request, "%sConnection: close\r\n", request);
   sprintf(request, "%sProxy-connection: close\r\n", request);
@@ -107,7 +136,24 @@ void build_request(rio_t * rio, char * request, char * hostname, char * query)
   printdetail("-----Send to server-----\n%s", request);
 }
 
-void parse_uri(char * uri, char * hostname, char * query)
+int send_request(char * hostname, char * port, char * request, int clientfd)
+{
+  int serverfd;
+  if (strlen(port) == 0) {//default to port 80
+    strcpy(port, "80");
+  }
+  if ((serverfd = open_clientfd(hostname, port)) < 0) {
+    proxyerror(clientfd, hostname, 400, "Bad request",
+	       "Proxy failed to connect to");
+    return serverfd;
+  }
+  printdetail("Connected to server %s on port %s\n", hostname, port);
+  Rio_writen(serverfd, request, strlen(request));
+  printdetail("Sent request to server %s\n", hostname);
+  return serverfd;
+}
+
+void parse_uri(char * uri, char * hostname, char * port, char * query)
 {
   char * ptr;
   /* Skip the "http://" part */
@@ -123,6 +169,14 @@ void parse_uri(char * uri, char * hostname, char * query)
     strcpy(hostname, uri);
     *ptr = '/';
     strcpy(query, ptr);
+  }
+  /* Split hostname with port */
+  ptr = strchr(hostname, ':');
+  if (ptr == NULL) {
+    strcpy(port, "");
+  } else {
+    *ptr = '\0';
+    strcpy(port, ptr + 1);
   }
 }
 
