@@ -16,11 +16,12 @@
 static const char * user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3";
 
 void serve(int fd);
-int get_request(rio_t * rio, char * method, char * uri, char * version);
+int  get_request(rio_t * rio, char * method, char * uri, char * version);
 void parse_uri(char * uri, char * hostname, char * port, char * query);
 void build_request(rio_t * rio, char * request, char * hostname,
 		   char * port, char * query);
-int send_request(char * hostname, char * port, char * request, int clientfd);
+int  send_request(char * hostname, char * port, char * request, int clientfd);
+void send_response(rio_t * rio, int connfd);
 void proxyerror(int fd, char * cause, int code,
 		char * shortmsg, char * longmsg);
 
@@ -34,6 +35,7 @@ int main(int argc, char * * argv)
   if (argc != 2) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
   }
+  Signal(SIGPIPE, SIG_IGN);
 
   listenfd = Open_listenfd(argv[1]);
 
@@ -41,9 +43,10 @@ int main(int argc, char * * argv)
     connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
     Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
 		port, MAXLINE, 0);
-    printf("Accepted connection from (%s:%s)\n\n", hostname, port);
+    printf("****************************************\n");
+    printf("Accepted connection from (%s:%s)\n", hostname, port);
     serve(connfd);
-    printdetail("Connection closed with (%s:%s)\n\n", hostname, port);
+    printf("Connection closed with (%s:%s)\n\n", hostname, port);
     Close(connfd);
   }
   return 0;
@@ -51,15 +54,14 @@ int main(int argc, char * * argv)
 
 void serve(int fd)
 {
-  char buf[MAXBUF];
   char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char hostname[MAXLINE], port[MAXLINE], query[MAXLINE];
   char request[MAXBUF];
   rio_t rio;
   int serverfd;
 
-  Rio_readinitb(&rio, fd);
   /* Read client request line */
+  Rio_readinitb(&rio, fd);
   if (!get_request(&rio, method, uri, version))
     return;
   /* Get hostname and query string from uri */
@@ -71,21 +73,7 @@ void serve(int fd)
     return;
   /* Read reponse from server and forward to client */
   Rio_readinitb(&rio, serverfd);
-  int contentlen = 0;
-  do {
-    Rio_readlineb(&rio, buf, MAXBUF);
-    Rio_writen(fd, buf, strlen(buf));
-    if (strncasecmp(buf, "Content-Length", 14) == 0) {
-      contentlen = atoi(buf + 15);
-    }      
-  } while (strcmp(buf, "\r\n") != 0);
-  while (contentlen > 0) {
-    size_t n = (contentlen > MAXBUF) ? MAXBUF : contentlen;
-    ssize_t s = Rio_readnb(&rio, buf, n);
-    if (s <= 0) break;
-    contentlen -= s;
-    Rio_writen(fd, buf, n);
-  }
+  send_response(&rio, fd);
   Close(serverfd);
 }
 
@@ -95,7 +83,8 @@ int get_request(rio_t * rio, char * method, char * uri, char * version)
   do {
     Rio_readlineb(rio, buf, MAXLINE);
   } while (strcmp(buf, "\r\n") == 0);
-  printdetail("%s", buf);
+  
+  printf("%s", buf);
   /* Check request line validity */
   if (sscanf(buf, "%s %s %s", method, uri, version) != 3 ||
       strstr(version, "HTTP/1.") == NULL) {
@@ -115,14 +104,9 @@ void build_request(rio_t * rio, char * request, char * hostname,
 		   char * port, char * query)
 {
   char buf[MAXLINE];
+  int flag = 0;// if the request already included host header
   sprintf(request, "GET %s HTTP/1.0\r\n", query);
-  if (strlen(port) == 0)
-    sprintf(request, "%sHost: %s\r\n", request, hostname);
-  else
-    sprintf(request, "%sHost: %s:%s\r\n", request, hostname, port);
   sprintf(request, "%s%s\r\n", request, user_agent_hdr);
-  sprintf(request, "%sConnection: close\r\n", request);
-  sprintf(request, "%sProxy-connection: close\r\n", request);
   do {
     Rio_readlineb(rio, buf, MAXLINE);
     printdetail("%s", buf);
@@ -131,8 +115,20 @@ void build_request(rio_t * rio, char * request, char * hostname,
 	strncasecmp(buf, "Connection", 10) == 0 ||
 	strncasecmp(buf, "Proxy-connection", 16) == 0)
       continue;
+    if (strncasecmp(buf, "Host", 4) == 0)
+      flag = 1;
     sprintf(request, "%s%s", request, buf);
   } while (strcmp(buf, "\r\n"));
+  /* Append proxy specified header at the end of the request */
+  request[strlen(request)-2] = '\0';
+  if (!flag) {
+    if (strlen(port) == 0)
+      sprintf(request, "%sHost: %s\r\n", request, hostname);
+    else
+      sprintf(request, "%sHost: %s:%s\r\n", request, hostname, port);
+  }
+  sprintf(request, "%sConnection: close\r\n", request);
+  sprintf(request, "%sProxy-connection: close\r\n\r\n", request);
   printdetail("-----Send to server-----\n%s", request);
 }
 
@@ -149,8 +145,45 @@ int send_request(char * hostname, char * port, char * request, int clientfd)
   }
   printdetail("Connected to server %s on port %s\n", hostname, port);
   Rio_writen(serverfd, request, strlen(request));
-  printdetail("Sent request to server %s\n", hostname);
+  printf("Sent request to server %s on port %s\n", hostname, port);
   return serverfd;
+}
+
+void send_response(rio_t * rio, int connfd)
+{
+  int contentlen = 0;
+  int istext = 0;
+  char buf[MAXBUF];
+  /* Read response headers and extract content information */
+  do {
+    Rio_readlineb(rio, buf, MAXBUF);
+    Rio_writen(connfd, buf, strlen(buf));
+    printdetail("%s", buf);
+    if (strncasecmp(buf, "Content-Type", 12) == 0) {
+      if (strncasecmp(buf + 14, "text", 4) == 0)
+	istext = 1;
+    }
+    if (strncasecmp(buf, "Content-Length", 14) == 0) {
+      contentlen = atoi(buf + 16);
+    }
+  } while (strcmp(buf, "\r\n") != 0);
+  /* If content length is specified, read response body with that length.
+     Otherwise, read response as text */
+  if (contentlen > 0) {
+    printf("Received response from server %d bytes\n", contentlen);
+    while (contentlen > 0) {
+      size_t n = (contentlen > MAXBUF) ? MAXBUF : contentlen;
+      ssize_t s = Rio_readnb(rio, buf, n);
+      if (s <= 0) break;
+      contentlen -= s;
+      Rio_writen(connfd, buf, n);
+    }
+  } else if (istext) {
+    printf("Received response from server in text format, length unknown\n");
+    while (Rio_readlineb(rio, buf, MAXBUF) > 0) {
+      Rio_writen(connfd, buf, strlen(buf));
+    }
+  }
 }
 
 void parse_uri(char * uri, char * hostname, char * port, char * query)
