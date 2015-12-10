@@ -5,7 +5,7 @@
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
-#define verbose
+//#define verbose
 #ifdef verbose
 # define printdetail(...) printf(__VA_ARGS__)
 #else
@@ -15,7 +15,7 @@
 /* You won't lose style points for including this long line in your code */
 static const char * user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3";
 
-void serve(int fd);
+void * serve(void * vargp);
 int  get_request(rio_t * rio, char * method, char * uri, char * version);
 void parse_uri(char * uri, char * hostname, char * port, char * query);
 void build_request(rio_t * rio, char * request, char * hostname,
@@ -27,10 +27,11 @@ void proxyerror(int fd, char * cause, int code,
 
 int main(int argc, char * * argv)
 {
-  int listenfd, connfd;
+  int listenfd, * connfd;
   char hostname[MAXLINE], port[MAXLINE];
   struct sockaddr_storage clientaddr;
   socklen_t clientlen = sizeof(clientaddr);
+  pthread_t tid;
 
   if (argc != 2) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -40,19 +41,19 @@ int main(int argc, char * * argv)
   listenfd = Open_listenfd(argv[1]);
 
   while (1) {
-    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+    connfd = Malloc(sizeof(int));
+    *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
     Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
 		port, MAXLINE, 0);
-    printf("****************************************\n");
-    printf("Accepted connection from (%s:%s)\n", hostname, port);
-    serve(connfd);
-    printf("Connection closed with (%s:%s)\n\n", hostname, port);
-    Close(connfd);
+    Pthread_create(&tid, NULL, serve, (void *)connfd);
+    printf("******************************************************\n");
+    printf("Thread %lu Accepted connection from (%s:%s)\n",
+	   (unsigned long)tid, hostname, port);
   }
   return 0;
 }
 
-void serve(int fd)
+void * serve(void * vargp)
 {
   char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char hostname[MAXLINE], port[MAXLINE], query[MAXLINE];
@@ -60,21 +61,32 @@ void serve(int fd)
   rio_t rio;
   int serverfd;
 
+  int connfd = *((int *)vargp);
+  Pthread_detach(pthread_self());
+  Free(vargp);
   /* Read client request line */
-  Rio_readinitb(&rio, fd);
-  if (!get_request(&rio, method, uri, version))
-    return;
+  Rio_readinitb(&rio, connfd);
+  if (!get_request(&rio, method, uri, version)) {
+    Close(connfd);
+    return NULL;
+  }
   /* Get hostname and query string from uri */
   parse_uri(uri, hostname, port, query);
   /* Build the request to be send out to server */
   build_request(&rio, request, hostname, port, query);
   /* Send request to server */
-  if ((serverfd = send_request(hostname, port, request, fd)) < 0)
-    return;
+  if ((serverfd = send_request(hostname, port, request, connfd)) < 0) {
+    Close(connfd);
+    return NULL;
+  }
   /* Read reponse from server and forward to client */
   Rio_readinitb(&rio, serverfd);
-  send_response(&rio, fd);
+  send_response(&rio, connfd);
   Close(serverfd);
+  Close(connfd);
+  printf("Thread %lu Finished proxy transaction\n",
+	 (unsigned long)pthread_self());
+  return NULL;
 }
 
 int get_request(rio_t * rio, char * method, char * uri, char * version)
@@ -129,7 +141,8 @@ void build_request(rio_t * rio, char * request, char * hostname,
   }
   sprintf(request, "%sConnection: close\r\n", request);
   sprintf(request, "%sProxy-connection: close\r\n\r\n", request);
-  printdetail("-----Send to server-----\n%s", request);
+  printdetail("Thread %lu Formatted header, ready to send\n%s",
+	      (unsigned long)pthread_self(), request);
 }
 
 int send_request(char * hostname, char * port, char * request, int clientfd)
@@ -143,9 +156,11 @@ int send_request(char * hostname, char * port, char * request, int clientfd)
 	       "Proxy failed to connect to");
     return serverfd;
   }
-  printdetail("Connected to server %s on port %s\n", hostname, port);
+  printdetail("Thread %lu Connected to server %s on port %s\n",
+	      (unsigned long)pthread_self(), hostname, port);
   Rio_writen(serverfd, request, strlen(request));
-  printf("Sent request to server %s on port %s\n", hostname, port);
+  printf("Thread %lu Sent request to server %s on port %s\n",
+	 (unsigned long)pthread_self(), hostname, port);
   return serverfd;
 }
 
@@ -170,18 +185,20 @@ void send_response(rio_t * rio, int connfd)
   /* If content length is specified, read response body with that length.
      Otherwise, read response as text */
   if (contentlen > 0) {
-    printf("Received response from server %d bytes\n", contentlen);
+    printf("Thread %lu Received %d byte response from server\n",
+	   (unsigned long)pthread_self(), contentlen);
     while (contentlen > 0) {
       size_t n = (contentlen > MAXBUF) ? MAXBUF : contentlen;
       ssize_t s = Rio_readnb(rio, buf, n);
       if (s <= 0) break;
       contentlen -= s;
-      Rio_writen(connfd, buf, n);
+      if (rio_writen(connfd, buf, n) != n) break;
     }
   } else if (istext) {
-    printf("Received response from server in text format, length unknown\n");
+    printf("Thread %lu Received response from server in text format\n",
+	   (unsigned long)pthread_self);
     while (Rio_readlineb(rio, buf, MAXBUF) > 0) {
-      Rio_writen(connfd, buf, strlen(buf));
+      if (rio_writen(connfd, buf, strlen(buf)) != strlen(buf)) break;
     }
   }
 }
@@ -239,4 +256,7 @@ void proxyerror(int fd, char * cause, int code,
   sprintf(buf, "Content-length: %zu\r\n\r\n", strlen(body));
   Rio_writen(fd, buf, strlen(buf));
   Rio_writen(fd, body, strlen(body));
+
+  printf("Thread %lu Terminated transaction with error code %d\n",
+	 (unsigned long)pthread_self(), code);
 }
