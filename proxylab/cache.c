@@ -1,4 +1,17 @@
+/*
+ * cache.c - definition of the cache managing functions for
+ *           multithreaded caching proxy.
+ *
+ * Author: Jieyu Lu      Andrew ID: jieyul1
+ */
 #include "cache.h"
+
+static Cache cache;       // cache object
+static int num_line;      // number of lines in the cache
+static int load_cnt;      // number of threads loading content from cache
+static sem_t load, save;  // semaphores in first readers-writers problem
+/* Helper function that updates the usage history array */
+static void update_usage(int);
 
 void cache_init()
 {
@@ -29,19 +42,9 @@ void cache_destroy()
   free(cache.line);
 }
 
-static void update_usage(int recent)
-{
-  int i, j;
-  for (i = 0; i < num_line; i++) {
-    if (cache.usage[i] == recent)
-      break;
-  }
-  for (j = i; j > 0; j--) {
-    cache.usage[j] = cache.usage[j - 1];
-  }
-  cache.usage[0] = recent;
-}
-
+/* Note that the usage array might not strictly reflect LRU, due to 
+   the uncertainty of thread execution order. Nevertheless, line number
+   to the front of the array must be recently used. */
 size_t cache_load(char * url, char * response)
 {
   P(&load);// protects load_cnt
@@ -79,7 +82,9 @@ void cache_save(char * url, char * response, size_t len)
 {
   P(&save);// locks save action
 
-  int evict = cache.usage[num_line - 1];// least recently used
+  /* least recently used line must be at the end of the array */
+  int evict = cache.usage[num_line - 1];
+  
   strcpy(cache.line[evict].url, url);
   memcpy(cache.line[evict].obj, response, len);
   if (cache.line[evict].valid == 0)
@@ -88,4 +93,23 @@ void cache_save(char * url, char * response, size_t len)
   update_usage(evict);
 
   V(&save);// unlocks save action
+}
+
+/*
+ * update_usage
+ *
+ * Updates the usage history by placing the recently used line number
+ * at the beginning of the usage array
+ */
+static void update_usage(int recent)
+{
+  int i, j;
+  for (i = 0; i < num_line; i++) {
+    if (cache.usage[i] == recent)
+      break;
+  }
+  for (j = i; j > 0; j--) {
+    cache.usage[j] = cache.usage[j - 1];
+  }
+  cache.usage[0] = recent;
 }

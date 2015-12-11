@@ -1,3 +1,10 @@
+/*
+ * proxy.c - A simple multithreaded caching web proxy
+ *
+ * Handles basic HTTP GET requests, and provides 1 Mb caching capability
+ *
+ * Author: Jieyu Lu      Andrew ID: jieyul1
+ */
 #include <stdio.h>
 #include "csapp.h"
 #include "cache.h"
@@ -21,6 +28,8 @@ int    send_request(char * hostname, char * port, char * request, int clientfd);
 size_t send_response(rio_t * rio, int connfd, char * response);
 void   proxyerror(int fd, char * cause, int code,
 		char * shortmsg, char * longmsg);
+
+/* Clean up when terminating the proxy */
 void sigint_handler(int sig)
 {
   char * msg = "Proxy has exited\n";
@@ -59,6 +68,13 @@ int main(int argc, char * * argv)
   return 0;
 }
 
+/*
+ * serve - thread routine that provides serice to one client.
+ *
+ * It reads the request, forwards the request to remote server if content
+ * has not been cached, reads the reponse from server, and forwards the 
+ * response to the client.
+ */
 void * serve(void * vargp)
 {
   char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
@@ -114,6 +130,11 @@ void * serve(void * vargp)
   return NULL;
 }
 
+/*
+ * get_request - reads and parses the GET request line
+ *
+ * Returns 1 if OK, returns 0 on error
+ */
 int get_request(rio_t * rio, char * method, char * uri, char * version)
 {
   char buf[MAXLINE];
@@ -137,6 +158,12 @@ int get_request(rio_t * rio, char * method, char * uri, char * version)
   return 1;
 }
 
+/*
+ * build_request - build the request to be sent to remote server
+ *
+ * The function intercepts some of the client request headers and 
+ * build the new request string
+ */
 void build_request(rio_t * rio, char * request, char * hostname,
 		   char * port, char * query)
 {
@@ -170,6 +197,11 @@ void build_request(rio_t * rio, char * request, char * hostname,
 	      (unsigned long)pthread_self(), request);
 }
 
+/* 
+ * send_request - sends request to the remote server
+ * 
+ * Returns the file descriptor of the socket connecting remote server
+ */
 int send_request(char * hostname, char * port, char * request, int clientfd)
 {
   int serverfd;
@@ -183,28 +215,42 @@ int send_request(char * hostname, char * port, char * request, int clientfd)
   }
   printdetail("Thread %lu Connected to server %s on port %s\n",
 	      (unsigned long)pthread_self(), hostname, port);
-  Rio_writen(serverfd, request, strlen(request));
+  if (rio_writen(serverfd, request, strlen(request)) < strlen(request)) {
+    proxyerror(clientfd, hostname, 400, "Bad request",
+	       "Proxy failed to send request to");
+    return serverfd;
+  }
   printf("Thread %lu Sent request to server %s on port %s\n",
 	 (unsigned long)pthread_self(), hostname, port);
   return serverfd;
 }
 
+/*
+ * send_response - reads response from server and then forwards to the client
+ *
+ * Stores the server response in memory for caching if the response size 
+ * less than maximum size allowed.
+ * Returns response size if can be stored in cache. Returns zero otherwise.
+ */
 size_t send_response(rio_t * rio, int connfd, char * response)
 {
   int contentlen = 0;
   size_t responselen = 0;
   int istext = 0;
   char buf[MAXBUF];
+  /* A flag to indicate whether or not to cache the response */
+  int to_cache = 0;
   memset(response, 0, MAX_OBJECT_SIZE);
   /* Read response headers and extract content information */
   do {
-    Rio_readlineb(rio, buf, MAXBUF);
-    Rio_writen(connfd, buf, strlen(buf));
+    if (rio_readlineb(rio, buf, MAXBUF) < 0)
+      return 0;
+    if (rio_writen(connfd, buf, strlen(buf)) != strlen(buf))
+      return 0;
     printdetail("%s", buf);
     /* Save to response buffer */
     strcat(response, buf);
     responselen += strlen(buf);
-    
     if (strncasecmp(buf, "Content-Type", 12) == 0) {
       if (strncasecmp(buf + 14, "text", 4) == 0)
 	istext = 1;
@@ -213,8 +259,6 @@ size_t send_response(rio_t * rio, int connfd, char * response)
       contentlen = atoi(buf + 16);
     }
   } while (strcmp(buf, "\r\n") != 0);
-  /* A flag to indicate whether or not to cache the response */
-  int to_cache = 0;
   /* If content length is specified, read response body with that length.
      Otherwise, read response as text */
   if (contentlen > 0) {
@@ -235,7 +279,7 @@ size_t send_response(rio_t * rio, int connfd, char * response)
   } else if (istext) {
     printf("Thread %lu Received response from server in text format\n",
 	   (unsigned long)pthread_self);
-    while (Rio_readlineb(rio, buf, MAXBUF) > 0) {
+    while (rio_readlineb(rio, buf, MAXBUF) > 0) {
       size_t s = strlen(buf);
       if (rio_writen(connfd, buf, s) != s) break;
       to_cache = (responselen + s) < MAX_OBJECT_SIZE;
@@ -251,6 +295,9 @@ size_t send_response(rio_t * rio, int connfd, char * response)
     return 0;
 }
 
+/*
+ * parse_uri - extracts hostname, port and query string from uri
+ */
 void parse_uri(char * uri, char * hostname, char * port, char * query)
 {
   char * ptr;
@@ -278,6 +325,9 @@ void parse_uri(char * uri, char * hostname, char * port, char * query)
   }
 }
 
+/*
+ * proxyerror - sends back HTML indicating error during proxy
+ */
 void proxyerror(int fd, char * cause, int code,
 		char * shortmsg, char * longmsg)
 {
