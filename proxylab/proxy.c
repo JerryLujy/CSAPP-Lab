@@ -265,13 +265,17 @@ size_t send_response(rio_t * rio, int connfd, char * response)
     to_cache = (responselen + contentlen) < MAX_OBJECT_SIZE;
     printf("Thread %lu Received %d byte response from server\n",
 	   (unsigned long)pthread_self(), contentlen);
+    /* The response is possibly binary file, can't build response using
+       string manipulations as it may overwrite padding 0's */
+    char * ranger = response + responselen;
     while (contentlen > 0) {
       size_t n = (contentlen > MAXBUF) ? MAXBUF : contentlen;
       ssize_t s = rio_readnb(rio, buf, n);
       if (s <= 0) break;
       if (to_cache) {
-	strncat(response, buf, s);
+	memcpy(ranger, buf, s);
 	responselen += s;
+	ranger += s;
       }
       contentlen -= s;
       if (rio_writen(connfd, buf, n) != n) break;
