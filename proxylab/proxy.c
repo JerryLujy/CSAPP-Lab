@@ -1,9 +1,6 @@
 #include <stdio.h>
 #include "csapp.h"
-
-/* Recommended max cache and object sizes */
-#define MAX_CACHE_SIZE 1049000
-#define MAX_OBJECT_SIZE 102400
+#include "cache.h"
 
 //#define verbose
 #ifdef verbose
@@ -16,14 +13,21 @@
 static const char * user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3";
 
 void * serve(void * vargp);
-int  get_request(rio_t * rio, char * method, char * uri, char * version);
-void parse_uri(char * uri, char * hostname, char * port, char * query);
-void build_request(rio_t * rio, char * request, char * hostname,
+int    get_request(rio_t * rio, char * method, char * uri, char * version);
+void   parse_uri(char * uri, char * hostname, char * port, char * query);
+void   build_request(rio_t * rio, char * request, char * hostname,
 		   char * port, char * query);
-int  send_request(char * hostname, char * port, char * request, int clientfd);
-void send_response(rio_t * rio, int connfd);
-void proxyerror(int fd, char * cause, int code,
+int    send_request(char * hostname, char * port, char * request, int clientfd);
+size_t send_response(rio_t * rio, int connfd, char * response);
+void   proxyerror(int fd, char * cause, int code,
 		char * shortmsg, char * longmsg);
+void sigint_handler(int sig)
+{
+  char * msg = "Proxy has exited\n";
+  cache_destroy();
+  Rio_writen(STDOUT_FILENO, msg, strlen(msg));
+  exit(0);
+}
 
 int main(int argc, char * * argv)
 {
@@ -36,8 +40,10 @@ int main(int argc, char * * argv)
   if (argc != 2) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
   }
+  Signal(SIGINT, sigint_handler);
   Signal(SIGPIPE, SIG_IGN);
-
+  
+  cache_init();
   listenfd = Open_listenfd(argv[1]);
 
   while (1) {
@@ -58,6 +64,8 @@ void * serve(void * vargp)
   char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char hostname[MAXLINE], port[MAXLINE], query[MAXLINE];
   char request[MAXBUF];
+  size_t contentlen;
+  char response[MAX_OBJECT_SIZE];
   rio_t rio;
   int serverfd;
 
@@ -70,6 +78,16 @@ void * serve(void * vargp)
     Close(connfd);
     return NULL;
   }
+  /* Try load from cache */
+  contentlen = cache_load(uri, response);
+  if (contentlen > 0) {
+    /* Cache hit, send content in cache to the client */
+    printf("Thread %lu Fetched %zu bytes from cache, transaction finished\n",
+	   (unsigned long)pthread_self(), contentlen);
+    rio_writen(connfd, response, contentlen);
+    Close(connfd);
+    return NULL;
+  }
   /* Get hostname and query string from uri */
   parse_uri(uri, hostname, port, query);
   /* Build the request to be send out to server */
@@ -79,9 +97,16 @@ void * serve(void * vargp)
     Close(connfd);
     return NULL;
   }
-  /* Read reponse from server and forward to client */
+  /* Read reponse from server and forward to client
+     Store the response to cache if it can be stored */
   Rio_readinitb(&rio, serverfd);
-  send_response(&rio, connfd);
+  contentlen = send_response(&rio, connfd, response);
+  if (contentlen > 0) {
+    /* Response can be stored in cache */
+    cache_save(uri, response, contentlen);
+    printf("Thread %lu Stored %zu bytes into cache\n",
+	   (unsigned long)pthread_self(), contentlen);
+  }
   Close(serverfd);
   Close(connfd);
   printf("Thread %lu Finished proxy transaction\n",
@@ -164,16 +189,22 @@ int send_request(char * hostname, char * port, char * request, int clientfd)
   return serverfd;
 }
 
-void send_response(rio_t * rio, int connfd)
+size_t send_response(rio_t * rio, int connfd, char * response)
 {
   int contentlen = 0;
+  size_t responselen = 0;
   int istext = 0;
   char buf[MAXBUF];
+  memset(response, 0, MAX_OBJECT_SIZE);
   /* Read response headers and extract content information */
   do {
     Rio_readlineb(rio, buf, MAXBUF);
     Rio_writen(connfd, buf, strlen(buf));
     printdetail("%s", buf);
+    /* Save to response buffer */
+    strcat(response, buf);
+    responselen += strlen(buf);
+    
     if (strncasecmp(buf, "Content-Type", 12) == 0) {
       if (strncasecmp(buf + 14, "text", 4) == 0)
 	istext = 1;
@@ -182,15 +213,22 @@ void send_response(rio_t * rio, int connfd)
       contentlen = atoi(buf + 16);
     }
   } while (strcmp(buf, "\r\n") != 0);
+  /* A flag to indicate whether or not to cache the response */
+  int to_cache = 0;
   /* If content length is specified, read response body with that length.
      Otherwise, read response as text */
   if (contentlen > 0) {
+    to_cache = (responselen + contentlen) < MAX_OBJECT_SIZE;
     printf("Thread %lu Received %d byte response from server\n",
 	   (unsigned long)pthread_self(), contentlen);
     while (contentlen > 0) {
       size_t n = (contentlen > MAXBUF) ? MAXBUF : contentlen;
-      ssize_t s = Rio_readnb(rio, buf, n);
+      ssize_t s = rio_readnb(rio, buf, n);
       if (s <= 0) break;
+      if (to_cache) {
+	strncat(response, buf, s);
+	responselen += s;
+      }
       contentlen -= s;
       if (rio_writen(connfd, buf, n) != n) break;
     }
@@ -198,9 +236,19 @@ void send_response(rio_t * rio, int connfd)
     printf("Thread %lu Received response from server in text format\n",
 	   (unsigned long)pthread_self);
     while (Rio_readlineb(rio, buf, MAXBUF) > 0) {
-      if (rio_writen(connfd, buf, strlen(buf)) != strlen(buf)) break;
+      size_t s = strlen(buf);
+      if (rio_writen(connfd, buf, s) != s) break;
+      to_cache = (responselen + s) < MAX_OBJECT_SIZE;
+      if (to_cache) {
+	strcat(response, buf);
+	responselen += s;
+      }
     }
   }
+  if (to_cache)
+    return responselen;
+  else
+    return 0;
 }
 
 void parse_uri(char * uri, char * hostname, char * port, char * query)
